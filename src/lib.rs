@@ -30,6 +30,7 @@
 //! overriding the implicit references contained in qcow2 files, and showcasing using different
 //! types of storage (specifically normal files and null storage):
 //! ```no_run
+//! # #[cfg(feature = "async")]
 //! # let _ = async {
 //! use imago::file::File;
 //! use imago::null::Null;
@@ -84,6 +85,9 @@
 //!
 //! # Features
 //!
+//! - `async` *(default)*: Build with `async` support, which requires `tokio` (for async locking)
+//!   and `async-trait`.
+//!
 //! - `sync-wrappers`: Provide synchronous wrappers for the native `async` interface.  Note that
 //!   these build a `tokio` runtime in which they run the `async` functions, so using the `async`
 //!   interface is definitely preferred.
@@ -92,6 +96,9 @@
 //!   [`IoVector::from_volatile_slice`](io_buffers::IoVector::from_volatile_slice) and
 //!   [`IoVectorMut::from_volatile_slice`](io_buffers::IoVectorMut::from_volatile_slice) to convert
 //!   the vm-memory crate’s `[VolatileSlice]` arrays into imago’s native I/O vectors.
+
+#[cfg(not(any(feature = "async", feature = "sync")))]
+compile_error!("Either the `async` feature (included in defaults) or `sync` must be enabled!");
 
 pub mod annotated;
 mod async_lru_cache;
