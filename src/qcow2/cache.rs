@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::async_lru_cache::AsyncLruCacheBackend;
+use maybe_async::maybe_async;
 use tracing::trace;
 
 /// I/O back-end for the L2 table cache.
@@ -31,6 +32,7 @@ impl<S: Storage> L2CacheBackend<S> {
     }
 }
 
+#[maybe_async(AFIT)]
 impl<S: Storage> AsyncLruCacheBackend for L2CacheBackend<S> {
     type Key = HostCluster;
     type Value = L2Table;
@@ -74,6 +76,7 @@ impl<S: Storage> RefBlockCacheBackend<S> {
     }
 }
 
+#[maybe_async(AFIT)]
 impl<S: Storage> AsyncLruCacheBackend for RefBlockCacheBackend<S> {
     type Key = HostCluster;
     type Value = RefBlock;
