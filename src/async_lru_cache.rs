@@ -10,7 +10,7 @@
 #![allow(dead_code)]
 
 use crate::sync_primitives::{RwLock, RwLockWriteGuard};
-use crate::vector_select::FutureVector;
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -341,21 +341,21 @@ impl<
         fields(self = &self as *const _ as usize)
     )]
     async fn flush(&self) -> io::Result<()> {
-        let mut futs = FutureVector::new();
+        let mut futs = FuturesUnordered::new();
 
         let map = self.map.read().await;
         for (key, entry) in map.iter() {
             let key = *key;
             let object = Arc::clone(entry.value());
             trace!("Flushing {key:?}");
-            futs.push(Box::pin(
-                async move { self.backend.flush(key, &object).await },
-            ));
+            futs.push(async move { self.backend.flush(key, &object).await });
         }
 
         let mut first_err = None;
-        while let Err(e) = futs.discarding_join().await {
-            first_err.get_or_insert(e);
+        while let Some(result) = futs.next().await {
+            if let Err(e) = result {
+                first_err.get_or_insert(e);
+            }
         }
         if let Some(e) = first_err {
             Err(e)

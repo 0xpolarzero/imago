@@ -78,8 +78,8 @@ implementation.)
 
 # Features
 
-- `async` *(default)*: Build with `async` support, which requires `tokio` (for async locking) and
-  `async-trait`.
+- `async` *(default)*: Build with `async` support, which requires `tokio` (for async locking),
+  `async-trait`, and `futures`.
 
 - `sync-wrappers`: Provide synchronous wrappers for the native `async` interface.  Note that
   these build a `tokio` runtime in which they run the `async` functions, so using the `async`

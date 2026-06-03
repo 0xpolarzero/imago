@@ -1,7 +1,7 @@
 //! Internal functionality for storage drivers.
 
 use crate::misc_helpers::Overlaps;
-use crate::vector_select::FutureVector;
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -82,7 +82,7 @@ impl CommonStorageHelper {
     /// write.  Await such intersecting concurrent write requests, and return a guard that will
     /// delay such new writes until the guard is dropped.
     pub async fn weak_write_blocker(&self, range: Range<u64>) -> RangeBlockedGuard<'_> {
-        let mut intersecting = FutureVector::new();
+        let mut intersecting = FuturesUnordered::new();
 
         // Create `RangeBlockedGuard` before the `await` below, so if the future is dropped,
         // `RangeBlockedGuard::drop()` will run, removing the blocker from the list
@@ -102,7 +102,7 @@ impl CommonStorageHelper {
         // `RecvError` means the blocker's guard was dropped without signaling, so the blocking
         // operation is gone, and thus waiting for it is pointless.  We must still wait for all
         // other overlapping blockers, so drain until all are actually done, ignoring errors.
-        while intersecting.discarding_join().await.is_err() {}
+        while intersecting.next().await.is_some() {}
 
         guard
     }
@@ -112,7 +112,7 @@ impl CommonStorageHelper {
     /// Block the given range for any concurrent write requests until the returned guard object is
     /// dropped.  Existing requests are awaited, and new ones will be delayed.
     pub async fn strong_write_blocker(&self, range: Range<u64>) -> RangeBlockedGuard<'_> {
-        let mut intersecting = FutureVector::new();
+        let mut intersecting = FuturesUnordered::new();
 
         // Create `RangeBlockedGuard` before the `await` below, so if the future is dropped,
         // `RangeBlockedGuard::drop()` will run, removing the blocker from the list
@@ -133,7 +133,7 @@ impl CommonStorageHelper {
         // `RecvError` means the blocker's guard was dropped without signaling, so the blocking
         // operation is gone, and thus waiting for it is pointless.  We must still wait for all
         // other overlapping blockers, so drain until all are actually done, ignoring errors.
-        while intersecting.discarding_join().await.is_err() {}
+        while intersecting.next().await.is_some() {}
 
         guard
     }
@@ -147,7 +147,7 @@ impl RangeBlockedList {
     fn collect_intersecting_await_futures(
         &self,
         check_range: &Range<u64>,
-        future_vector: &mut FutureVector<(), oneshot::error::RecvError, oneshot::Receiver<()>>,
+        future_vector: &mut FuturesUnordered<oneshot::Receiver<()>>,
     ) {
         for range_block in self.blocked.iter() {
             if range_block.range.overlaps(check_range) {

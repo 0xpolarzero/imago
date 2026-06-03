@@ -6,8 +6,8 @@ use super::drivers::{FormatDriverInstance, ShallowMapping};
 use super::PreallocateMode;
 use crate::io_buffers::{IoVector, IoVectorMut};
 use crate::storage::ext::write_full_zeroes;
-use crate::vector_select::FutureVector;
 use crate::{Storage, StorageExt};
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::fmt::{self, Display, Formatter};
 use std::{cmp, io, ptr};
 
@@ -335,7 +335,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
     /// Reads until `bufv` is filled completely, i.e. will not do short reads.  When reaching the
     /// end of file, the rest of `bufv` is filled with 0.
     pub async fn readv(&self, mut bufv: IoVectorMut<'_>, mut offset: u64) -> io::Result<()> {
-        let mut workers = (self.read_parallelization > 1).then(FutureVector::new);
+        let mut workers = (self.read_parallelization > 1).then(FuturesUnordered::new);
 
         while !bufv.is_empty() {
             let (mapping, chunk_length) = self.get_mapping(offset, bufv.len()).await?;
@@ -347,7 +347,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
 
             if let Some(workers) = workers.as_mut() {
                 while workers.len() >= self.read_parallelization {
-                    workers.select().await?;
+                    workers.next().await.unwrap()?;
                 }
             }
 
@@ -356,14 +356,14 @@ impl<S: Storage + 'static> FormatAccess<S> {
             offset += chunk_length;
 
             if let Some(workers) = workers.as_mut() {
-                workers.push(Box::pin(self.read_chunk(chunk, mapping)));
+                workers.push(self.read_chunk(chunk, mapping));
             } else {
                 self.read_chunk(chunk, mapping).await?;
             }
         }
 
         if let Some(mut workers) = workers {
-            workers.discarding_join().await?;
+            while workers.next().await.transpose()?.is_some() {}
         }
 
         Ok(())
@@ -395,7 +395,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
             bufv = bufv.split_at(disk_size - offset).0;
         }
 
-        let mut workers = (self.write_parallelization > 1).then(FutureVector::new);
+        let mut workers = (self.write_parallelization > 1).then(FuturesUnordered::new);
 
         while !bufv.is_empty() {
             let (storage, st_offset, st_length) =
@@ -403,7 +403,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
 
             if let Some(workers) = workers.as_mut() {
                 while workers.len() >= self.write_parallelization {
-                    workers.select().await?;
+                    workers.next().await.unwrap()?;
                 }
             }
 
@@ -412,14 +412,14 @@ impl<S: Storage + 'static> FormatAccess<S> {
             offset += st_length;
 
             if let Some(workers) = workers.as_mut() {
-                workers.push(Box::pin(storage.writev(chunk, st_offset)));
+                workers.push(storage.writev(chunk, st_offset));
             } else {
                 storage.writev(chunk, st_offset).await?;
             }
         }
 
         if let Some(mut workers) = workers {
-            workers.discarding_join().await?;
+            while workers.next().await.transpose()?.is_some() {}
         }
 
         Ok(())

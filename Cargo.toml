@@ -11,6 +11,7 @@ readme = "README.md"
 async-trait = "0.1"
 bincode = { version = "2", features = ["derive"], default-features = false }
 cfg-if = "1"
+futures = { version = "0.3", features = ["alloc"], default-features = false }
 maybe-async = "0.2"
 miniz_oxide = { version = "0.8", features = ["std"] }
 nix = { version = "0.30", features = ["ioctl"] }
