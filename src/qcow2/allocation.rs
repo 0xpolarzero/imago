@@ -4,8 +4,8 @@
 //! refcount structures.
 
 use super::*;
+use crate::sync_primitives::MutexGuard;
 use std::mem;
-use tokio::sync::MutexGuard;
 use tracing::{event, warn, Level};
 
 /// Central facility for cluster allocation.

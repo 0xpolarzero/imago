@@ -111,6 +111,7 @@ pub mod null;
 pub mod qcow2;
 pub mod raw;
 pub mod storage;
+mod sync_primitives;
 mod vector_select;
 pub mod vmdk;
 

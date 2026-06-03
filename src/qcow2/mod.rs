@@ -22,6 +22,7 @@ use crate::format::{Format, PreallocateMode};
 use crate::io_buffers::IoVectorMut;
 use crate::misc_helpers::{invalid_data, ResultErrorContext};
 use crate::raw::Raw;
+use crate::sync_primitives::{Mutex, RwLock};
 use crate::{storage, FormatAccess, ShallowMapping, Storage, StorageExt, StorageOpenOptions};
 use allocation::Allocator;
 use async_trait::async_trait;
@@ -34,7 +35,6 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use std::{cmp, io};
-use tokio::sync::{Mutex, RwLock};
 use types::*;
 
 /// Access qcow2 images.

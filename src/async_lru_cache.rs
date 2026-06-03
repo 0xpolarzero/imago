@@ -9,6 +9,7 @@
 
 #![allow(dead_code)]
 
+use crate::sync_primitives::{RwLock, RwLockWriteGuard};
 use crate::vector_select::FutureVector;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -16,7 +17,6 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::{io, mem};
-use tokio::sync::{RwLock, RwLockWriteGuard};
 use tracing::{error, instrument, trace};
 
 /// Cache entry structure, wrapping the cached object.

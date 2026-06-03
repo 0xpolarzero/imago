@@ -1,7 +1,7 @@
 //! Get and establish cluster mappings.
 
 use super::*;
-use tokio::sync::RwLockWriteGuard;
+use crate::sync_primitives::RwLockWriteGuard;
 
 impl<S: Storage, F: WrappedFormat<S>> Qcow2<S, F> {
     /// Get the given range’s mapping information.
