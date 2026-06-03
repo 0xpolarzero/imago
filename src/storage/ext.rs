@@ -7,6 +7,7 @@
 use super::drivers::RangeBlockedGuard;
 use crate::io_buffers::{IoBuffer, IoVector, IoVectorMut, IoVectorTrait};
 use crate::Storage;
+use maybe_async::maybe_async;
 use std::ops::Range;
 use std::{cmp, io};
 use tracing::trace;
@@ -14,6 +15,7 @@ use tracing::trace;
 /// Helper methods for storage objects.
 ///
 /// Provides some more convenient methods for accessing storage objects.
+#[maybe_async(AFIT)]
 pub trait StorageExt: Storage {
     /// Read data at `offset` into `bufv`.
     ///
@@ -46,7 +48,7 @@ pub trait StorageExt: Storage {
     /// Checks alignment.  If anything does not meet the requirements, enforces it (using ephemeral
     /// bounce buffers).
     #[allow(async_fn_in_trait)] // No need for Send
-    async fn read(&self, buf: impl Into<IoVectorMut<'_>>, offset: u64) -> io::Result<()>;
+    async fn read<'a>(&'a self, buf: impl Into<IoVectorMut<'a>>, offset: u64) -> io::Result<()>;
 
     /// Write data from `buf` to `offset`.
     ///
@@ -59,7 +61,7 @@ pub trait StorageExt: Storage {
     /// Checks alignment.  If anything does not meet the requirements, enforces it using bounce
     /// buffers and a read-modify-write cycle that blocks concurrent writes to the affected area.
     #[allow(async_fn_in_trait)] // No need for Send
-    async fn write(&self, buf: impl Into<IoVector<'_>>, offset: u64) -> io::Result<()>;
+    async fn write<'a>(&'a self, buf: impl Into<IoVector<'a>>, offset: u64) -> io::Result<()>;
 
     /// Ensure the given range reads back as zeroes.
     #[allow(async_fn_in_trait)] // No need for Send
@@ -92,6 +94,7 @@ pub trait StorageExt: Storage {
     async fn strong_write_blocker(&self, range: Range<u64>) -> RangeBlockedGuard<'_>;
 }
 
+#[maybe_async(AFIT)]
 impl<S: Storage> StorageExt for S {
     async fn readv(&self, mut bufv: IoVectorMut<'_>, offset: u64) -> io::Result<()> {
         if bufv.is_empty() {
@@ -239,11 +242,11 @@ impl<S: Storage> StorageExt for S {
         unsafe { self.pure_writev(bounce_buf.as_ref().into(), padded_offset) }.await
     }
 
-    async fn read(&self, buf: impl Into<IoVectorMut<'_>>, offset: u64) -> io::Result<()> {
+    async fn read<'a>(&'a self, buf: impl Into<IoVectorMut<'a>>, offset: u64) -> io::Result<()> {
         self.readv(buf.into(), offset).await
     }
 
-    async fn write(&self, buf: impl Into<IoVector<'_>>, offset: u64) -> io::Result<()> {
+    async fn write<'a>(&'a self, buf: impl Into<IoVector<'a>>, offset: u64) -> io::Result<()> {
         self.writev(buf.into(), offset).await
     }
 
@@ -314,6 +317,7 @@ fn is_aligned<V: IoVectorTrait>(bufv: &V, offset: u64, mem_align: usize, req_ali
 ///
 /// In contrast to `write_zeroes()` functions, this one will actually write zero data, fully
 /// allocated.
+#[maybe_async]
 pub(crate) async fn write_full_zeroes<S: StorageExt>(
     storage: S,
     mut offset: u64,
@@ -352,6 +356,7 @@ pub(crate) async fn write_full_zeroes<S: StorageExt>(
 ///
 /// If the `pure_*` call fails with [`io::ErrorKind::Unsupported`], fall back to
 /// [`write_full_zeroes()`].
+#[maybe_async]
 pub(crate) async fn write_efficient_zeroes<S: StorageExt>(
     storage: S,
     offset: u64,

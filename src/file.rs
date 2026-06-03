@@ -11,6 +11,7 @@ use crate::storage::ext::write_full_zeroes;
 use crate::storage::PreallocateMode;
 use crate::{Storage, StorageCreateOptions, StorageOpenOptions};
 use cfg_if::cfg_if;
+use maybe_async::maybe_async;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Write};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -91,6 +92,7 @@ impl TryFrom<fs::File> for File {
     }
 }
 
+#[maybe_async(AFIT)]
 impl Storage for File {
     async fn open(opts: StorageOpenOptions) -> io::Result<Self> {
         Self::do_open_sync(opts, fs::OpenOptions::new())
@@ -402,6 +404,7 @@ impl Storage for File {
     }
 }
 
+#[maybe_async]
 impl File {
     /// Central internal function to create a `File` object.
     ///

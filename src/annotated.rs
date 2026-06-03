@@ -7,6 +7,8 @@
 //!
 //! Example:
 //! ```
+//! # #[cfg(feature = "async")]
+//! # {
 //! # use imago::{FormatAccess, Mapping};
 //! # use imago::annotated::Annotated;
 //! # use imago::null::Null;
@@ -38,12 +40,14 @@
 //! #
 //! # Ok::<(), std::io::Error>(())
 //! # }).unwrap()
+//! # }
 //! ```
 
 use crate::io_buffers::{IoVector, IoVectorMut};
 use crate::storage::drivers::CommonStorageHelper;
 use crate::storage::PreallocateMode;
 use crate::{Storage, StorageCreateOptions, StorageOpenOptions};
+use maybe_async::maybe_async;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::io;
 use std::ops::{Deref, DerefMut};
@@ -90,6 +94,7 @@ impl<T: Debug + Default + Display + Send + Sync, S: Storage> From<S> for Annotat
     }
 }
 
+#[maybe_async(AFIT)]
 impl<T: Debug + Default + Display + Send + Sync, S: Storage> Storage for Annotated<T, S> {
     async fn open(opts: StorageOpenOptions) -> io::Result<Self> {
         Ok(S::open(opts).await?.into())

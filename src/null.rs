@@ -6,6 +6,7 @@ use crate::io_buffers::{IoVector, IoVectorMut};
 use crate::storage::drivers::CommonStorageHelper;
 use crate::storage::PreallocateMode;
 use crate::Storage;
+use maybe_async::maybe_async;
 use std::fmt::{self, Display, Formatter};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,6 +34,7 @@ impl Null {
     }
 }
 
+#[maybe_async(AFIT)]
 impl Storage for Null {
     fn size(&self) -> io::Result<u64> {
         Ok(self.size.load(Ordering::Relaxed))
