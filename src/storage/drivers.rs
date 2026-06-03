@@ -1,11 +1,16 @@
 //! Internal functionality for storage drivers.
 
 use crate::misc_helpers::Overlaps;
+#[cfg(feature = "async")]
 use futures::stream::{FuturesUnordered, StreamExt};
+use maybe_async::maybe_async;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "sync")]
+use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
-use tokio::sync::oneshot;
+#[cfg(feature = "async")]
+use tokio::sync::oneshot::{self, Sender};
 
 /// Helper object for the [`StorageExt`](crate::StorageExt) implementation.
 ///
@@ -49,7 +54,7 @@ struct RangeBlocked {
     /// `oneshot::Sender::send(())`).
     ///
     /// Normal non-async mutex, so do not await while locked!
-    waitlist: std::sync::Mutex<Vec<oneshot::Sender<()>>>,
+    waitlist: std::sync::Mutex<Vec<Sender<()>>>,
 
     /// Index in the corresponding `RangeBlockedList.blocked` list, so it can be dropped quickly.
     ///
@@ -75,6 +80,7 @@ pub struct RangeBlockedGuard<'a> {
     block: Option<Arc<RangeBlocked>>,
 }
 
+#[maybe_async]
 impl CommonStorageHelper {
     /// Await concurrent strong write blockers for the given range.
     ///
@@ -82,7 +88,10 @@ impl CommonStorageHelper {
     /// write.  Await such intersecting concurrent write requests, and return a guard that will
     /// delay such new writes until the guard is dropped.
     pub async fn weak_write_blocker(&self, range: Range<u64>) -> RangeBlockedGuard<'_> {
+        #[cfg(feature = "async")]
         let mut intersecting = FuturesUnordered::new();
+        #[cfg(feature = "sync")]
+        let mut intersecting = Vec::new();
 
         // Create `RangeBlockedGuard` before the `await` below, so if the future is dropped,
         // `RangeBlockedGuard::drop()` will run, removing the blocker from the list
@@ -91,7 +100,7 @@ impl CommonStorageHelper {
             let mut weak = self.weak_write_blockers.write().unwrap();
             let strong = self.strong_write_blockers.read().unwrap();
 
-            strong.collect_intersecting_await_futures(&range, &mut intersecting);
+            strong.collect_intersecting(&range, &mut intersecting);
 
             RangeBlockedGuard {
                 list: &self.weak_write_blockers,
@@ -102,7 +111,12 @@ impl CommonStorageHelper {
         // `RecvError` means the blocker's guard was dropped without signaling, so the blocking
         // operation is gone, and thus waiting for it is pointless.  We must still wait for all
         // other overlapping blockers, so drain until all are actually done, ignoring errors.
+        #[cfg(feature = "async")]
         while intersecting.next().await.is_some() {}
+        #[cfg(feature = "sync")]
+        for rx in intersecting {
+            let _ = rx.recv();
+        }
 
         guard
     }
@@ -112,7 +126,10 @@ impl CommonStorageHelper {
     /// Block the given range for any concurrent write requests until the returned guard object is
     /// dropped.  Existing requests are awaited, and new ones will be delayed.
     pub async fn strong_write_blocker(&self, range: Range<u64>) -> RangeBlockedGuard<'_> {
+        #[cfg(feature = "async")]
         let mut intersecting = FuturesUnordered::new();
+        #[cfg(feature = "sync")]
+        let mut intersecting = Vec::new();
 
         // Create `RangeBlockedGuard` before the `await` below, so if the future is dropped,
         // `RangeBlockedGuard::drop()` will run, removing the blocker from the list
@@ -121,8 +138,8 @@ impl CommonStorageHelper {
             let weak = self.weak_write_blockers.read().unwrap();
             let mut strong = self.strong_write_blockers.write().unwrap();
 
-            weak.collect_intersecting_await_futures(&range, &mut intersecting);
-            strong.collect_intersecting_await_futures(&range, &mut intersecting);
+            weak.collect_intersecting(&range, &mut intersecting);
+            strong.collect_intersecting(&range, &mut intersecting);
 
             RangeBlockedGuard {
                 list: &self.strong_write_blockers,
@@ -133,35 +150,45 @@ impl CommonStorageHelper {
         // `RecvError` means the blocker's guard was dropped without signaling, so the blocking
         // operation is gone, and thus waiting for it is pointless.  We must still wait for all
         // other overlapping blockers, so drain until all are actually done, ignoring errors.
+        #[cfg(feature = "async")]
         while intersecting.next().await.is_some() {}
+        #[cfg(feature = "sync")]
+        for rx in intersecting {
+            let _ = rx.recv();
+        }
 
         guard
     }
 }
 
 impl RangeBlockedList {
-    /// Collects futures to await intersecting request.
+    /// Collects futures/receivers to await intersecting request.
     ///
-    /// Adds a future to `future_vector` for every intersecting request; awaiting that future will
-    /// await the request.
-    fn collect_intersecting_await_futures(
+    /// Creates a channel for every intersecting request; blocking on the receiver will wait for
+    /// the request to complete.
+    fn collect_intersecting(
         &self,
         check_range: &Range<u64>,
-        future_vector: &mut FuturesUnordered<oneshot::Receiver<()>>,
+        #[cfg(feature = "async")] intersecting: &mut FuturesUnordered<oneshot::Receiver<()>>,
+        #[cfg(feature = "sync")] intersecting: &mut Vec<mpsc::Receiver<()>>,
     ) {
         for range_block in self.blocked.iter() {
             if range_block.range.overlaps(check_range) {
+                #[cfg(feature = "async")]
                 let (s, r) = oneshot::channel::<()>();
+                #[cfg(feature = "sync")]
+                let (s, r) = mpsc::channel();
+
                 range_block.waitlist.lock().unwrap().push(s);
-                future_vector.push(r);
+                intersecting.push(r);
             }
         }
     }
 
     /// Enter a new blocked range into the list.
     ///
-    /// This only blocks new requests, old requests must separately be awaited by awaiting all
-    /// futures returned by `collect_intersecting_await_futures()`.
+    /// This only blocks new requests, old requests must separately be waited for by blocking on
+    /// all receivers returned by `collect_intersecting()`.
     fn block(&mut self, range: Range<u64>) -> Arc<RangeBlocked> {
         let range_block = Arc::new(RangeBlocked {
             range,
