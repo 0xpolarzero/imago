@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::async_lru_cache::AsyncLruCacheBackend;
-use maybe_async::maybe_async;
 use tracing::trace;
 
 /// I/O back-end for the L2 table cache.
@@ -138,6 +137,7 @@ pub(super) struct MetadataCaches<S: Storage> {
     direction: RwLock<CacheDependency>,
 }
 
+#[maybe_async]
 impl<S: Storage> MetadataCaches<S> {
     /// Create metadata caches for the given file, with the given header.
     ///
@@ -319,6 +319,12 @@ mod tests {
         MetadataCaches::new(&null, &header, 16, 16)
     }
 
+    #[cfg(feature = "sync")]
+    fn block_on<T>(v: T) -> T {
+        v
+    }
+
+    #[cfg(feature = "async")]
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
             .build()
@@ -327,7 +333,7 @@ mod tests {
     }
 
     /// Direction switching is idempotent and doesn't error.
-    #[tokio::test]
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
     async fn test_direction_switch() {
         let caches = make_test_caches();
 
@@ -428,7 +434,7 @@ mod tests {
     }
 
     /// Direction switch must flush the opposing cache's dirty entries.
-    #[tokio::test]
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
     async fn test_direction_switch_flushes_opposing() {
         let null = Arc::new(Null::new(1 << 20));
         let header = Arc::new(Header::new(16, 1, None, None, None));
@@ -458,7 +464,7 @@ mod tests {
     ///
     /// With l2→rb active, inserting into a full l2 cache must flush
     /// rb (the dependency) before evicting the l2 entry.
-    #[tokio::test]
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
     async fn test_dep_flushed_before_eviction() {
         let null = Arc::new(Null::new(1 << 20));
         let header = Arc::new(Header::new(16, 1, None, None, None));

@@ -9,6 +9,7 @@ use crate::storage::ext::write_full_zeroes;
 use crate::{Storage, StorageExt};
 #[cfg(feature = "async")]
 use futures::stream::{FuturesUnordered, StreamExt};
+use maybe_async::maybe_async;
 use std::fmt::{self, Display, Formatter};
 use std::{cmp, io, ptr};
 
@@ -104,6 +105,7 @@ pub enum Mapping<'a, S: Storage + 'static> {
 }
 
 // When adding new public methods, don’t forget to add them to sync_wrappers, too.
+#[maybe_async]
 impl<S: Storage + 'static> FormatAccess<S> {
     /// Wrap a format driver instance in `FormatAccess`.
     ///
@@ -386,7 +388,11 @@ impl<S: Storage + 'static> FormatAccess<S> {
     ///
     /// Reads until `buf` is filled completely, i.e. will not do short reads.  When reaching the
     /// end of file, the rest of `buf` is filled with 0.
-    pub async fn read(&self, buf: impl Into<IoVectorMut<'_>>, offset: u64) -> io::Result<()> {
+    pub async fn read<'a>(
+        &'a self,
+        buf: impl Into<IoVectorMut<'a>>,
+        offset: u64,
+    ) -> io::Result<()> {
         self.readv(buf.into(), offset).await
     }
 
@@ -448,7 +454,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
     ///
     /// Writes all data from `bufv` (or returns an error), i.e. will not do short writes.  Reaching
     /// the end of file before the end of the buffer results in an error.
-    pub async fn write(&self, buf: impl Into<IoVector<'_>>, offset: u64) -> io::Result<()> {
+    pub async fn write<'a>(&'a self, buf: impl Into<IoVector<'a>>, offset: u64) -> io::Result<()> {
         self.writev(buf.into(), offset).await
     }
 
@@ -792,13 +798,14 @@ impl<S: Storage + 'static> FormatAccess<S> {
         Ok(())
     }
 
-    /// Flush internal buffers.  Always call this before drop!
+    /// Flush internal buffers.  Always call this before drop! (except in sync mode)
     ///
     /// Does not necessarily sync those buffers to disk.  When using `flush()`, consider whether
     /// you want to call `sync()` afterwards.
     ///
-    /// Because of the current lack of stable `async_drop`, you must manually call this before
-    /// dropping a `FormatAccess` instance!  (Not necessarily for read-only images, though.)
+    /// In async mode, because of the current lack of stable `async_drop`, you must manually call
+    /// this before dropping a `FormatAccess` instance!  (Not necessarily for read-only images,
+    /// though.)  In sync mode, `Drop` calls this automatically.
     ///
     /// Note that this will not drop the buffers, so they may still be used to serve later
     /// accesses.  Use [`FormatAccess::invalidate_cache()`] to drop all buffers.
@@ -918,6 +925,16 @@ impl<S: Storage> Display for Mapping<'_, S> {
             Mapping::Special { layer, offset } => {
                 write!(f, "<special:{layer}:0x{offset:x}>")
             }
+        }
+    }
+}
+
+#[cfg(feature = "sync")]
+impl<S: Storage> Drop for FormatAccess<S> {
+    fn drop(&mut self) {
+        if let Err(err) = self.flush() {
+            let inner = &self.inner;
+            tracing::error!("Failed to flush {inner}: {err}");
         }
     }
 }

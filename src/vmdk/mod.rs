@@ -9,7 +9,7 @@ use crate::io_buffers::IoBuffer;
 use crate::misc_helpers::{invalid_data, ResultErrorContext};
 use crate::storage::ext::StorageExt;
 use crate::{FormatAccess, ShallowMapping, Storage, StorageOpenOptions};
-use async_trait::async_trait;
+use maybe_async::maybe_async;
 use std::fmt::{self, Display, Formatter};
 use std::marker::PhantomData;
 use std::ops::{Range, RangeInclusive};
@@ -245,6 +245,7 @@ fn parse_desc_value<F: FromStr>(key: &str, value: &str) -> io::Result<F> {
         .map_err(|_| invalid_data(format!("Invalid '{key}' value: {stripped}")))
 }
 
+#[maybe_async]
 impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Vmdk<S, F> {
     /// Create a new [`FormatDriverBuilder`] instance for the given image.
     pub fn builder(image: S) -> VmdkOpenBuilder<S, F> {
@@ -533,7 +534,7 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Display for Vmdk<S, F>
     }
 }
 
-#[async_trait(?Send)]
+#[maybe_async(?Send)]
 impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> FormatDriverInstance for Vmdk<S, F> {
     type Storage = S;
 
@@ -608,6 +609,7 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> FormatDriverInstance f
         false
     }
 
+    #[allow(clippy::needless_lifetimes)] // Elidable in sync, but async needs a named lifetime for the boxed future bound
     async fn get_mapping<'a>(
         &'a self,
         offset: u64,
@@ -657,6 +659,7 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> FormatDriverInstance f
         ))
     }
 
+    #[allow(clippy::needless_lifetimes)] // Elidable in sync, but async needs a named lifetime for the boxed future bound
     async fn ensure_data_mapping<'a>(
         &'a self,
         _offset: u64,
@@ -693,6 +696,7 @@ pub struct VmdkOpenBuilder<S: Storage + 'static, F: WrappedFormat<S> + 'static =
     PhantomData<F>,
 );
 
+#[maybe_async(AFIT)]
 impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> FormatDriverBuilder<S>
     for VmdkOpenBuilder<S, F>
 {

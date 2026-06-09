@@ -8,7 +8,9 @@
 use crate::{FormatAccess, Storage};
 use std::fmt::{Debug, Display};
 use std::ops::Deref;
+#[cfg(feature = "async")]
 use std::sync::Arc;
+#[cfg(feature = "async")]
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
 /// Represents [`FormatAccess`] wrapped in e.g. `Arc`, `Box`, or nothing at all.
@@ -47,6 +49,7 @@ impl<S: Storage> WrappedFormat<S> for FormatAccess<S> {
     }
 }
 
+#[cfg(feature = "async")]
 impl<S: Storage> WrappedFormat<S> for OwnedRwLockReadGuard<FormatAccess<S>> {
     fn wrap(inner: FormatAccess<S>) -> Self {
         // Ugly, but works.

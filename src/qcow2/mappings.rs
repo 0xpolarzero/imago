@@ -3,6 +3,7 @@
 use super::*;
 use crate::sync_primitives::RwLockWriteGuard;
 
+#[maybe_async]
 impl<S: Storage, F: WrappedFormat<S>> Qcow2<S, F> {
     /// Get the given range’s mapping information.
     ///

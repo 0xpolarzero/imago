@@ -25,10 +25,10 @@ use crate::raw::Raw;
 use crate::sync_primitives::{Mutex, RwLock};
 use crate::{storage, FormatAccess, ShallowMapping, Storage, StorageExt, StorageOpenOptions};
 use allocation::Allocator;
-use async_trait::async_trait;
 pub use builder::{Qcow2CreateBuilder, Qcow2OpenBuilder};
 use cache::MetadataCaches;
 use mappings::FixedMapping;
+use maybe_async::maybe_async;
 use metadata::*;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::ops::Range;
@@ -76,6 +76,7 @@ pub struct Qcow2<S: Storage + 'static, F: WrappedFormat<S> + 'static = FormatAcc
     allocator: Option<Mutex<Allocator<S>>>,
 }
 
+#[maybe_async]
 impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
     /// Create a new [`FormatDriverBuilder`] instance for the given image.
     pub fn builder(image: S) -> Qcow2OpenBuilder<S, F> {
@@ -287,8 +288,11 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
     ) -> io::Result<F> {
         let opts =
             Qcow2::<S>::builder(file).storage_open_options(self.storage_open_options.clone());
-        // Recursive, so needs to be boxed
+        // This is recursive, and in async mode, Box::pin is needed for recursion
+        #[cfg(feature = "async")]
         let qcow2 = Box::pin(gate.open_format(opts)).await?;
+        #[cfg(feature = "sync")]
+        let qcow2 = gate.open_format(opts)?;
         Ok(F::wrap(qcow2))
     }
 
@@ -431,7 +435,7 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
     }
 }
 
-#[async_trait(?Send)]
+#[maybe_async(?Send)]
 impl<S: Storage, F: WrappedFormat<S>> FormatDriverInstance for Qcow2<S, F> {
     type Storage = S;
 
@@ -479,6 +483,7 @@ impl<S: Storage, F: WrappedFormat<S>> FormatDriverInstance for Qcow2<S, F> {
         self.writable
     }
 
+    #[allow(clippy::needless_lifetimes)] // Elidable in sync, but async needs a named lifetime for the boxed future bound
     async fn get_mapping<'a>(
         &'a self,
         offset: u64,
@@ -494,6 +499,7 @@ impl<S: Storage, F: WrappedFormat<S>> FormatDriverInstance for Qcow2<S, F> {
         self.do_get_mapping(offset, max_length).await
     }
 
+    #[allow(clippy::needless_lifetimes)] // Elidable in sync, but async needs a named lifetime for the boxed future bound
     async fn ensure_data_mapping<'a>(
         &'a self,
         offset: u64,

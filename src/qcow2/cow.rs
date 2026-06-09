@@ -5,6 +5,7 @@
 use super::*;
 use crate::io_buffers::IoBuffer;
 
+#[maybe_async]
 impl<S: Storage, F: WrappedFormat<S>> Qcow2<S, F> {
     /// Do copy-on-write for the given guest cluster, if necessary.
     ///

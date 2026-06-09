@@ -108,6 +108,7 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2OpenBuilder<S, F>
     }
 }
 
+#[maybe_async(AFIT)]
 impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> FormatDriverBuilder<S>
     for Qcow2OpenBuilder<S, F>
 {
@@ -241,6 +242,7 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2CreateBuilder<S, 
     }
 }
 
+#[maybe_async(AFIT)]
 impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> FormatCreateBuilder<S>
     for Qcow2CreateBuilder<S, F>
 {

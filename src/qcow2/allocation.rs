@@ -26,6 +26,7 @@ pub(super) struct Allocator<S: Storage> {
     caches: Arc<MetadataCaches<S>>,
 }
 
+#[maybe_async]
 impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
     /// Return the central allocator instance.
     ///
@@ -142,6 +143,7 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
     }
 }
 
+#[maybe_async]
 impl<S: Storage> Allocator<S> {
     /// Create a new allocator for the given image file.
     pub async fn new(
@@ -335,11 +337,16 @@ impl<S: Storage> Allocator<S> {
         // in this exact function again, trying to allocate the very same refblock (it is possible
         // we allocate one before the current one, though), and so prevent any possible infinite
         // recursion.
-        // Recursion is possible, though, so the future must be boxed.
-        // false`), so must be boxed.
-        if let Ok(new_rb_cluster) =
-            Box::pin(self.allocate_clusters(ClusterCount(1), Some(rb_cluster))).await
-        {
+        let alloc_fut_or_result = self.allocate_clusters(ClusterCount(1), Some(rb_cluster));
+
+        // Recursion is possible, though, so in async mode, any future must be boxed
+        #[cfg(feature = "async")]
+        let alloc_result = Box::pin(alloc_fut_or_result).await;
+        // Whereas in sync mode, we now already have the result
+        #[cfg(feature = "sync")]
+        let alloc_result = alloc_fut_or_result;
+
+        if let Ok(new_rb_cluster) = alloc_result {
             new_rb.set_cluster(new_rb_cluster);
         } else {
             // Place the refblock such that it covers itself

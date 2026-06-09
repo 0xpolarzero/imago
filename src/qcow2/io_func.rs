@@ -7,6 +7,7 @@
 use super::*;
 use crate::io_buffers::IoBuffer;
 
+#[maybe_async]
 impl<S: Storage, F: WrappedFormat<S>> Qcow2<S, F> {
     /// Read the special range at `offset`.
     ///

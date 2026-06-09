@@ -2,6 +2,7 @@
 
 use super::builder::FormatDriverBuilder;
 use crate::{FormatAccess, Storage, StorageOpenOptions};
+use maybe_async::maybe_async;
 use std::io;
 
 /// Gate implicit image and storage object dependencies.
@@ -24,6 +25,7 @@ use std::io;
 /// [`Storage::open()`] is *not* run through `ImplicitOpenGate`.
 ///
 /// See [`PermissiveImplicitOpenGate`] and [`DenyImplicitOpenGate`].
+#[maybe_async(AFIT)]
 pub trait ImplicitOpenGate<S: Storage + 'static> {
     /// Open an implicitly referenced format layer.
     ///
@@ -63,15 +65,18 @@ pub trait ImplicitOpenGate<S: Storage + 'static> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PermissiveImplicitOpenGate();
 
+#[maybe_async(AFIT)]
 impl<S: Storage + 'static> ImplicitOpenGate<S> for PermissiveImplicitOpenGate {
     async fn open_format<F: FormatDriverBuilder<S>>(
         &mut self,
         builder: F,
     ) -> io::Result<FormatAccess<S>> {
-        // Recursion, need to box
-        Ok(FormatAccess::new(
-            Box::pin(builder.open(Self::default())).await?,
-        ))
+        // In async mode, Box::pin is needed for recursion
+        #[cfg(feature = "async")]
+        let driver_instance = Box::pin(builder.open(Self::default())).await?;
+        #[cfg(feature = "sync")]
+        let driver_instance = builder.open(Self::default())?;
+        Ok(FormatAccess::new(driver_instance))
     }
 
     async fn open_storage(&mut self, builder: StorageOpenOptions) -> io::Result<S> {
@@ -90,6 +95,7 @@ impl<S: Storage + 'static> ImplicitOpenGate<S> for PermissiveImplicitOpenGate {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DenyImplicitOpenGate();
 
+#[maybe_async(AFIT)]
 impl<S: Storage + 'static> ImplicitOpenGate<S> for DenyImplicitOpenGate {
     async fn open_format<F: FormatDriverBuilder<S>>(
         &mut self,
