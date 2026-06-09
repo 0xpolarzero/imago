@@ -7,18 +7,16 @@ Documentation:
 * *main* branch: [https://hreitz.gitlab.io/imago](https://hreitz.gitlab.io/imago)
 * `sync` feature: [https://hreitz.gitlab.io/imago/sync](https://hreitz.gitlab.io/imago/sync)
 
-Simple example (requires the `sync-wrappers` feature):
+Simple example (requires the `sync` feature):
 ```rust
 use imago::file::File;
 use imago::qcow2::Qcow2;
-use imago::{FormatDriverBuilder, PermissiveImplicitOpenGate, SyncFormatAccess};
-use std::fs::OpenOptions;
+use imago::{FormatAccess, FormatDriverBuilder, PermissiveImplicitOpenGate};
 
-// Produce read-only qcow2 instance using purely `File` for storage
-let mut qcow2 = Qcow2::<File>::builder_path("image.qcow2")
-    .open_sync(PermissiveImplicitOpenGate::default())?;
+let qcow2 =
+    Qcow2::<File>::builder_path("image.qcow2").open(PermissiveImplicitOpenGate::default())?;
 
-let qcow2 = SyncFormatAccess::new(qcow2)?;
+let qcow2 = FormatAccess::new(qcow2);
 
 let mut buf = vec![0u8; 512];
 qcow2.read(&mut buf, 0)?;
