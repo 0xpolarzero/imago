@@ -7,6 +7,7 @@ use super::PreallocateMode;
 use crate::io_buffers::{IoVector, IoVectorMut};
 use crate::storage::ext::write_full_zeroes;
 use crate::{Storage, StorageExt};
+#[cfg(feature = "async")]
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::fmt::{self, Display, Formatter};
 use std::{cmp, io, ptr};
@@ -21,9 +22,11 @@ pub struct FormatAccess<S: Storage + 'static> {
     writable: bool,
 
     /// How many asynchronous requests to perform per read request in parallel.
+    #[cfg(feature = "async")]
     read_parallelization: usize,
 
     /// How many asynchronous requests to perform per write request in parallel.
+    #[cfg(feature = "async")]
     write_parallelization: usize,
 }
 
@@ -110,7 +113,9 @@ impl<S: Storage + 'static> FormatAccess<S> {
         let writable = inner.writable();
         FormatAccess {
             inner: Box::new(inner),
+            #[cfg(feature = "async")]
             read_parallelization: 1,
+            #[cfg(feature = "async")]
             write_parallelization: 1,
             writable,
         }
@@ -135,6 +140,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
     ///
     /// When issuing read requests, issue this many async requests in parallel (still in a single
     /// thread).  The default count is `1`, i.e. no parallel requests.
+    #[cfg(feature = "async")]
     pub fn set_async_read_parallelization(&mut self, count: usize) {
         self.read_parallelization = count;
     }
@@ -143,6 +149,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
     ///
     /// When issuing write requests, issue this many async requests in parallel (still in a single
     /// thread).  The default count is `1`, i.e. no parallel requests.
+    #[cfg(feature = "async")]
     pub fn set_async_write_parallelization(&mut self, count: usize) {
         self.write_parallelization = count;
     }
@@ -335,6 +342,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
     /// Reads until `bufv` is filled completely, i.e. will not do short reads.  When reaching the
     /// end of file, the rest of `bufv` is filled with 0.
     pub async fn readv(&self, mut bufv: IoVectorMut<'_>, mut offset: u64) -> io::Result<()> {
+        #[cfg(feature = "async")]
         let mut workers = (self.read_parallelization > 1).then(FuturesUnordered::new);
 
         while !bufv.is_empty() {
@@ -345,6 +353,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
                 break;
             }
 
+            #[cfg(feature = "async")]
             if let Some(workers) = workers.as_mut() {
                 while workers.len() >= self.read_parallelization {
                     workers.next().await.unwrap()?;
@@ -355,13 +364,17 @@ impl<S: Storage + 'static> FormatAccess<S> {
             bufv = remainder;
             offset += chunk_length;
 
+            #[cfg(feature = "async")]
             if let Some(workers) = workers.as_mut() {
                 workers.push(self.read_chunk(chunk, mapping));
             } else {
                 self.read_chunk(chunk, mapping).await?;
             }
+            #[cfg(feature = "sync")]
+            self.read_chunk(chunk, mapping)?;
         }
 
+        #[cfg(feature = "async")]
         if let Some(mut workers) = workers {
             while workers.next().await.transpose()?.is_some() {}
         }
@@ -395,12 +408,14 @@ impl<S: Storage + 'static> FormatAccess<S> {
             bufv = bufv.split_at(disk_size - offset).0;
         }
 
+        #[cfg(feature = "async")]
         let mut workers = (self.write_parallelization > 1).then(FuturesUnordered::new);
 
         while !bufv.is_empty() {
             let (storage, st_offset, st_length) =
                 self.ensure_data_mapping(offset, bufv.len(), true).await?;
 
+            #[cfg(feature = "async")]
             if let Some(workers) = workers.as_mut() {
                 while workers.len() >= self.write_parallelization {
                     workers.next().await.unwrap()?;
@@ -411,13 +426,17 @@ impl<S: Storage + 'static> FormatAccess<S> {
             bufv = remainder;
             offset += st_length;
 
+            #[cfg(feature = "async")]
             if let Some(workers) = workers.as_mut() {
                 workers.push(storage.writev(chunk, st_offset));
             } else {
                 storage.writev(chunk, st_offset).await?;
             }
+            #[cfg(feature = "sync")]
+            storage.writev(chunk, st_offset)?;
         }
 
+        #[cfg(feature = "async")]
         if let Some(mut workers) = workers {
             while workers.next().await.transpose()?.is_some() {}
         }
