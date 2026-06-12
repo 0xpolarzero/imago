@@ -178,7 +178,9 @@ impl Drop for RangeBlockedGuard<'_> {
         let block = Arc::into_inner(block).unwrap();
         let waitlist = block.waitlist.into_inner().unwrap();
         for waiting in waitlist {
-            waiting.send(()).unwrap();
+            // If the receiving end was dropped (e.g. because the request was dropped), then just
+            // ignore that
+            let _ = waiting.send(());
         }
     }
 }
