@@ -259,12 +259,14 @@ impl<
             trace!("{} / {} used", map.len(), self.limit);
 
             let now = self.lru_timer.load(Ordering::Relaxed);
-            let (evicted_object, key, last_used) = loop {
-                let oldest = map.iter().fold((0, None), |oldest, (key, entry)| {
-                    // Cannot drop entries that are in use
-                    if Arc::strong_count(entry.value()) > 1 {
-                        return oldest;
-                    }
+            let oldest = map
+                .iter()
+                .filter(|(_key, entry)| Arc::strong_count(entry.value()) == 1)
+                .fold((0, None), |oldest, (key, entry)| {
+                    // Users must not create weak references, and so we know that with a `strong_count`
+                    // of 1 (while holding the map’s write lock), no one can access this entry anymore
+                    // and we could safely drop it.
+                    assert_eq!(Arc::weak_count(entry.value()), 0);
 
                     let age = now.wrapping_sub(entry.last_used.load(Ordering::Relaxed));
                     if age >= oldest.0 {
@@ -274,45 +276,34 @@ impl<
                     }
                 });
 
-                let Some(oldest_key) = oldest.1 else {
-                    error!("Cannot evict entry from cache; everything is in use");
-                    return Err(io::Error::other(
-                        "Cannot evict entry from cache; everything is in use",
-                    ));
-                };
-
-                trace!("Removing entry with key {oldest_key:?}, aged {}", oldest.0);
-
-                let mut oldest_entry = map.remove(&oldest_key).unwrap();
-                match Arc::try_unwrap(oldest_entry.value.take().unwrap()) {
-                    Ok(object) => {
-                        break (
-                            object,
-                            oldest_key,
-                            oldest_entry.last_used.load(Ordering::Relaxed),
-                        )
-                    }
-                    Err(arc) => {
-                        trace!("Entry is still in use, retrying");
-
-                        // Found a race, retry.
-                        // (`Arc::strong_count()` should return `1` in the next iteration,
-                        // filtering this entry out.)
-                        oldest_entry.value = Some(arc);
-                    }
-                }
+            let Some(oldest_key) = oldest.1 else {
+                error!("Cannot evict entry from cache; everything is in use");
+                return Err(io::Error::other(
+                    "Cannot evict entry from cache; everything is in use",
+                ));
             };
+
+            trace!("Removing entry with key {oldest_key:?}, aged {}", oldest.0);
+
+            let oldest_entry = map.remove(&oldest_key).unwrap();
+
+            // We checked `strong_count` above to be 1, and there are no weak references, so the
+            // only reference to this entry must have been the one in the map.  We held the write
+            // lock throughout, there was no await point between the check and here, so the
+            // `strong_count` must still be 1 and we can thus safely unwrap the `Arc`.
+            let evicted_object = Arc::try_unwrap(oldest_entry.value.unwrap())
+                .unwrap_or_else(|_| panic!("entry has gained external references"));
 
             let mut dep_guard = self.flush_before.lock().await;
             Self::flush_dependencies(&mut dep_guard).await?;
             let obj = Arc::new(evicted_object);
-            trace!("Flushing {key:?}");
-            if let Err(err) = self.backend.flush(key, Arc::clone(&obj)).await {
+            trace!("Flushing {oldest_key:?}");
+            if let Err(err) = self.backend.flush(oldest_key, Arc::clone(&obj)).await {
                 map.insert(
-                    key,
+                    oldest_key,
                     AsyncLruCacheEntry {
                         value: Some(obj),
-                        last_used: last_used.into(),
+                        last_used: oldest_entry.last_used.load(Ordering::Relaxed).into(),
                     },
                 );
                 return Err(err);
@@ -327,6 +318,8 @@ impl<
     ///
     /// If there is no entry yet, run `read()` to generate it.  If then there are more entries in
     /// the cache than its limit, flush out the oldest entry via `flush()`.
+    ///
+    /// Users must not create weak references to the returned `Arc`.
     async fn get_or_insert(&self, key: K) -> io::Result<Arc<V>> {
         {
             let map = self.map.read().await;
