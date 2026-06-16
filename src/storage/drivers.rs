@@ -93,7 +93,10 @@ impl CommonStorageHelper {
             weak.block(range)
         };
 
-        intersecting.discarding_join().await.unwrap();
+        // `RecvError` means the blocker's guard was dropped without signaling, so the blocking
+        // operation is gone, and thus waiting for it is pointless.  We must still wait for all
+        // other overlapping blockers, so drain until all are actually done, ignoring errors.
+        while intersecting.discarding_join().await.is_err() {}
 
         RangeBlockedGuard {
             list: &self.weak_write_blockers,
@@ -118,7 +121,10 @@ impl CommonStorageHelper {
             strong.block(range)
         };
 
-        intersecting.discarding_join().await.unwrap();
+        // `RecvError` means the blocker's guard was dropped without signaling, so the blocking
+        // operation is gone, and thus waiting for it is pointless.  We must still wait for all
+        // other overlapping blockers, so drain until all are actually done, ignoring errors.
+        while intersecting.discarding_join().await.is_err() {}
 
         RangeBlockedGuard {
             list: &self.strong_write_blockers,
