@@ -411,7 +411,15 @@ impl<
             futs.push(Box::pin(self.backend.flush(key, object)));
         }
 
-        futs.discarding_join().await
+        let mut first_err = None;
+        while let Err(e) = futs.discarding_join().await {
+            first_err.get_or_insert(e);
+        }
+        if let Some(e) = first_err {
+            Err(e)
+        } else {
+            Ok(())
+        }
     }
 
     /// Evict all cache entries.
