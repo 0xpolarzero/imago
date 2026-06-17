@@ -26,7 +26,7 @@ use crate::{storage, FormatAccess, ShallowMapping, Storage, StorageExt, StorageO
 use allocation::Allocator;
 use async_trait::async_trait;
 pub use builder::{Qcow2CreateBuilder, Qcow2OpenBuilder};
-use cache::L2CacheBackend;
+use cache::MetadataCaches;
 use mappings::FixedMapping;
 use metadata::*;
 use std::fmt::{self, Debug, Display, Formatter};
@@ -67,8 +67,8 @@ pub struct Qcow2<S: Storage + 'static, F: WrappedFormat<S> + 'static = FormatAcc
     /// L1 table.
     l1_table: RwLock<L1Table>,
 
-    /// L2 table cache.
-    l2_cache: AsyncLruCache<HostCluster, L2Table, L2CacheBackend<S>>,
+    /// L2 and refblock caches
+    caches: Arc<MetadataCaches<S>>,
 
     /// Allocates clusters.
     ///
@@ -112,16 +112,19 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
             L1Table::load(&metadata, &header, l1_cluster, header.l1_table_entries()).await?;
 
         let metadata = Arc::new(metadata);
+        let caches = Arc::new(MetadataCaches::new(&metadata, &header, 128, 32));
 
         let allocator = if writable {
-            let allocator = Allocator::new(Arc::clone(&metadata), Arc::clone(&header)).await?;
+            let allocator = Allocator::new(
+                Arc::clone(&metadata),
+                Arc::clone(&header),
+                Arc::clone(&caches),
+            )
+            .await?;
             Some(Mutex::new(allocator))
         } else {
             None
         };
-
-        let l2_cache_backend = L2CacheBackend::new(Arc::clone(&metadata), Arc::clone(&header));
-        let l2_cache = AsyncLruCache::new(l2_cache_backend, 128);
 
         Ok(Qcow2 {
             metadata,
@@ -137,7 +140,7 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
             header,
             l1_table: RwLock::new(l1_table),
 
-            l2_cache,
+            caches,
             allocator,
         })
     }
@@ -567,7 +570,7 @@ impl<S: Storage, F: WrappedFormat<S>> FormatDriverInstance for Qcow2<S, F> {
     }
 
     async fn flush(&self) -> io::Result<()> {
-        self.l2_cache.flush().await?;
+        self.caches.flush_l2().await?;
         if let Some(allocator) = self.allocator.as_ref() {
             allocator.lock().await.flush_rb_cache().await?;
         }
@@ -591,7 +594,7 @@ impl<S: Storage, F: WrappedFormat<S>> FormatDriverInstance for Qcow2<S, F> {
 
     async unsafe fn invalidate_cache(&self) -> io::Result<()> {
         // Safe: Caller says we should do this
-        unsafe { self.l2_cache.invalidate() }.await?;
+        unsafe { self.caches.invalidate_l2() }.await?;
         if let Some(allocator) = self.allocator.as_ref() {
             let allocator = allocator.lock().await;
             // Safe: Caller says we should do this
@@ -618,8 +621,12 @@ impl<S: Storage, F: WrappedFormat<S>> FormatDriverInstance for Qcow2<S, F> {
         self.header.update(&new_header)?;
 
         if let Some(allocator) = self.allocator.as_ref() {
-            *allocator.lock().await =
-                Allocator::new(Arc::clone(&self.metadata), Arc::clone(&self.header)).await?;
+            *allocator.lock().await = Allocator::new(
+                Arc::clone(&self.metadata),
+                Arc::clone(&self.header),
+                Arc::clone(&self.caches),
+            )
+            .await?;
         }
 
         // Alignment checked in `load()`
