@@ -497,3 +497,239 @@ impl<
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// Minimal backend for testing: load returns the key, flush is a no-op
+    struct DummyBackend;
+
+    impl AsyncLruCacheBackend for DummyBackend {
+        type Key = usize;
+        type Value = usize;
+
+        async fn load(&self, key: usize) -> io::Result<usize> {
+            Ok(key)
+        }
+
+        async fn flush(&self, _key: usize, _value: &usize) -> io::Result<()> {
+            Ok(())
+        }
+
+        unsafe fn evict(&self, _key: usize, _value: usize) {}
+    }
+
+    /// Backend that records flush calls in order
+    #[derive(Default)]
+    struct RecordingBackend {
+        flushed: std::sync::Mutex<Vec<(usize, usize)>>,
+    }
+
+    impl AsyncLruCacheBackend for RecordingBackend {
+        type Key = usize;
+        type Value = usize;
+
+        async fn load(&self, key: usize) -> io::Result<usize> {
+            Ok(key)
+        }
+
+        async fn flush(&self, key: usize, value: &usize) -> io::Result<()> {
+            self.flushed.lock().unwrap().push((key, *value));
+            Ok(())
+        }
+
+        unsafe fn evict(&self, _key: usize, _value: usize) {}
+    }
+
+    impl<B: AsyncLruCacheBackend> AsyncLruCacheBackend for Arc<B> {
+        type Key = <B as AsyncLruCacheBackend>::Key;
+        type Value = <B as AsyncLruCacheBackend>::Value;
+
+        async fn load(&self, key: Self::Key) -> io::Result<Self::Value> {
+            (**self).load(key).await
+        }
+
+        async fn flush(&self, key: Self::Key, value: &Self::Value) -> io::Result<()> {
+            (**self).flush(key, value).await
+        }
+
+        unsafe fn evict(&self, key: Self::Key, value: Self::Value) {
+            unsafe { (**self).evict(key, value) }
+        }
+    }
+
+    /// `flush()` must continue past individual entry errors and report the first one, not stop at
+    /// the first failure
+    #[tokio::test]
+    async fn test_flush_continues_past_errors() {
+        #[derive(Default)]
+        struct FailOddBackend {
+            flush_count: AtomicUsize,
+        }
+
+        impl AsyncLruCacheBackend for FailOddBackend {
+            type Key = usize;
+            type Value = usize;
+
+            async fn load(&self, key: usize) -> io::Result<usize> {
+                Ok(key)
+            }
+
+            async fn flush(&self, key: usize, _value: &usize) -> io::Result<()> {
+                self.flush_count.fetch_add(1, Ordering::Relaxed);
+                if key % 2 == 1 {
+                    Err(io::Error::other("odd key"))
+                } else {
+                    Ok(())
+                }
+            }
+
+            unsafe fn evict(&self, _key: usize, _value: usize) {}
+        }
+
+        const ENTRIES: usize = 42;
+
+        let backend = Arc::new(FailOddBackend::default());
+        let cache = AsyncLruCache::new(Arc::clone(&backend), ENTRIES);
+
+        for i in 0..ENTRIES {
+            cache.get_or_insert(i).await.unwrap();
+        }
+
+        let err = cache.flush().await.unwrap_err();
+        assert!(err.to_string().contains("odd key"));
+
+        assert_eq!(backend.flush_count.load(Ordering::Relaxed), ENTRIES);
+    }
+
+    /// Eviction must remove the least-recently-used entry
+    #[tokio::test]
+    async fn test_lru_eviction_order() {
+        const ENTRIES: usize = 3;
+
+        let backend = Arc::new(RecordingBackend::default());
+        let cache = AsyncLruCache::new(Arc::clone(&backend), ENTRIES);
+
+        for i in 0..ENTRIES {
+            cache.get_or_insert(i).await.unwrap();
+        }
+
+        // Touch key 0 so it becomes most-recently-used
+        cache.get_or_insert(0).await.unwrap();
+
+        // Insert one more key — must evict key 1 (the oldest untouched)
+        cache.get_or_insert(ENTRIES).await.unwrap();
+
+        assert_eq!(*backend.flushed.lock().unwrap(), [(1, 1)]);
+    }
+
+    /// Entries with external `Arc` references must not be evicted
+    #[tokio::test]
+    async fn test_in_use_entries_not_evicted() {
+        let backend = Arc::new(RecordingBackend::default());
+        let cache = AsyncLruCache::new(Arc::clone(&backend), 2);
+
+        let held = cache.get_or_insert(0).await.unwrap();
+        cache.get_or_insert(1).await.unwrap();
+
+        // Insert key 2 — key 0 is oldest but in use, so key 1 must be evicted
+        cache.get_or_insert(2).await.unwrap();
+
+        assert_eq!(*backend.flushed.lock().unwrap(), [(1, 1)]);
+        assert_eq!(*held, 0);
+    }
+
+    /// When all entries are in use, eviction must fail with an error
+    #[tokio::test]
+    async fn test_cache_full_all_in_use() {
+        const ENTRIES: usize = 23;
+
+        let cache = AsyncLruCache::new(DummyBackend, ENTRIES);
+
+        let mut held = vec![];
+        for i in 0..ENTRIES {
+            held.push(cache.get_or_insert(i).await.unwrap());
+        }
+
+        let err = cache.get_or_insert(ENTRIES).await.unwrap_err();
+        assert!(err.to_string().contains("everything is in use"));
+    }
+
+    /// `invalidate()` must retain entries that are still in use and evict the rest
+    #[tokio::test]
+    async fn test_invalidate_retains_in_use() {
+        let cache = AsyncLruCache::new(DummyBackend, 16);
+
+        let held = cache.get_or_insert(0).await.unwrap();
+        cache.get_or_insert(1).await.unwrap();
+        cache.get_or_insert(2).await.unwrap();
+
+        let err = unsafe { cache.invalidate() }.await.unwrap_err();
+        assert!(err.to_string().contains("still in use"));
+
+        let from_cache = cache.get_or_insert(0).await.unwrap();
+        assert!(Arc::ptr_eq(&from_cache, &held));
+
+        assert_eq!(cache.0.map.read().await.len(), 1);
+    }
+
+    /// When eviction flush fails, the entry must be re-inserted and remain accessible
+    #[tokio::test]
+    async fn test_eviction_flush_failure_reinserts_entry() {
+        struct FailFlushBackend;
+
+        impl AsyncLruCacheBackend for FailFlushBackend {
+            type Key = usize;
+            type Value = usize;
+
+            async fn load(&self, key: usize) -> io::Result<usize> {
+                Ok(key)
+            }
+
+            async fn flush(&self, _key: usize, _value: &usize) -> io::Result<()> {
+                Err(io::Error::other("flush failed"))
+            }
+
+            unsafe fn evict(&self, _key: usize, _value: usize) {}
+        }
+
+        const ENTRIES: usize = 2;
+
+        let cache = AsyncLruCache::new(FailFlushBackend, ENTRIES);
+
+        for i in 0..ENTRIES {
+            cache.get_or_insert(i).await.unwrap();
+        }
+
+        // Eviction flush fails
+        let err = cache.get_or_insert(ENTRIES).await.unwrap_err();
+        assert!(err.to_string().contains("flush failed"));
+
+        // All original entries must still be in the cache
+        assert_eq!(cache.0.map.read().await.len(), ENTRIES);
+        for i in 0..ENTRIES {
+            let entry = cache.get_or_insert(i).await.unwrap();
+            assert_eq!(*entry, i);
+        }
+
+        // New entry was never inserted
+        let err = cache.get_or_insert(ENTRIES).await.unwrap_err();
+        assert!(err.to_string().contains("flush failed"));
+    }
+
+    /// `insert()` over an existing key must flush the old value first
+    #[tokio::test]
+    async fn test_insert_flushes_existing() {
+        let backend = Arc::new(RecordingBackend::default());
+        let cache = AsyncLruCache::new(Arc::clone(&backend), 16);
+
+        cache.get_or_insert(5).await.unwrap();
+        cache.insert(5, Arc::new(55)).await.unwrap();
+
+        assert_eq!(*backend.flushed.lock().unwrap(), [(5, 5)]);
+        assert_eq!(*cache.get_or_insert(5).await.unwrap(), 55);
+        assert_eq!(cache.0.map.read().await.len(), 1);
+    }
+}
