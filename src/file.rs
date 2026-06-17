@@ -133,11 +133,11 @@ impl Storage for File {
     }
 
     fn zero_align(&self) -> usize {
-        self.zero_align
+        cmp::max(self.zero_align, self.req_align)
     }
 
     fn discard_align(&self) -> usize {
-        self.discard_align
+        cmp::max(self.discard_align, self.req_align)
     }
 
     fn size(&self) -> io::Result<u64> {
@@ -476,17 +476,24 @@ impl File {
             page_size = assume;
         }
 
-        #[cfg(not(target_os = "macos"))]
-        let (mut zero_align, mut discard_align) = (1usize, 1usize);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let (mut zero_align, mut discard_align) = {
             let mut statfs: libc::statfs = unsafe { std::mem::zeroed() };
             // Safe: FD is valid, passed pointer is valid and its type matches the call.
             match while_eintr(|| unsafe { libc::fstatfs(file.as_raw_fd(), &mut statfs) }) {
+                // On macOS, `f_bsize` is the fundamental block size.  On Linux, `f_bsize` is the
+                // optimal transfer block size and `f_frsize` is the actual block size.
+                #[cfg(target_os = "linux")]
+                Ok(_) => (statfs.f_frsize as usize, statfs.f_frsize as usize),
+                #[cfg(target_os = "macos")]
                 Ok(_) => (statfs.f_bsize as usize, statfs.f_bsize as usize),
+
                 Err(_) => (page_size, page_size),
             }
         };
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let (mut zero_align, mut discard_align) = (page_size, page_size);
 
         // Double-check to make absolutely sure both are powers of two
         if !zero_align.is_power_of_two() {
