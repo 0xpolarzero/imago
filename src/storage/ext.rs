@@ -319,15 +319,17 @@ pub(crate) async fn write_full_zeroes<S: StorageExt>(
     mut offset: u64,
     mut length: u64,
 ) -> io::Result<()> {
-    let buflen = cmp::min(length, 1048576) as usize;
-    let mut buf = IoBuffer::new(buflen, storage.mem_align())?;
-    buf.as_mut().into_slice().fill(0);
-
     let req_align = storage.req_align();
     let req_align_mask = (req_align - 1) as u64;
 
+    let mem_align = storage.mem_align();
+    let max_chunk_len = cmp::max(cmp::max(req_align, mem_align), 1048576) as u64;
+    let buflen = cmp::min(length, max_chunk_len) as usize;
+    let mut buf = IoBuffer::new(buflen, storage.mem_align())?;
+    buf.as_mut().into_slice().fill(0);
+
     while length > 0 {
-        let mut chunk_length = cmp::min(length, 1048576) as usize;
+        let mut chunk_length = cmp::min(length, max_chunk_len) as usize;
         if offset & req_align_mask != 0 {
             chunk_length = cmp::min(chunk_length, req_align - (offset & req_align_mask) as usize);
         }
