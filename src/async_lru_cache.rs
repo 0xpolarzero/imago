@@ -93,7 +93,7 @@ pub(crate) trait AsyncLruCacheBackend: Send + Sync {
     /// The implementation should itself check whether the object is dirty; `flush()` is called for
     /// all evicted cache entries, regardless of whether they actually are dirty or not.
     #[allow(async_fn_in_trait)] // No need for Send
-    async fn flush(&self, key: Self::Key, value: Arc<Self::Value>) -> io::Result<()>;
+    async fn flush(&self, key: Self::Key, value: &Self::Value) -> io::Result<()>;
 
     /// Drop the given object without flushing.
     ///
@@ -296,19 +296,17 @@ impl<
 
             let mut dep_guard = self.flush_before.lock().await;
             Self::flush_dependencies(&mut dep_guard).await?;
-            let obj = Arc::new(evicted_object);
             trace!("Flushing {oldest_key:?}");
-            if let Err(err) = self.backend.flush(oldest_key, Arc::clone(&obj)).await {
+            if let Err(err) = self.backend.flush(oldest_key, &evicted_object).await {
                 map.insert(
                     oldest_key,
                     AsyncLruCacheEntry {
-                        value: Some(obj),
+                        value: Some(Arc::new(evicted_object)),
                         last_used: oldest_entry.last_used.load(Ordering::Relaxed).into(),
                     },
                 );
                 return Err(err);
             }
-            let _ = Arc::into_inner(obj).expect("flush() must not clone the object");
         }
 
         Ok(())
@@ -366,7 +364,7 @@ impl<
             );
             let mut dep_guard = self.flush_before.lock().await;
             Self::flush_dependencies(&mut dep_guard).await?;
-            self.backend.flush(key, Arc::clone(entry.value())).await?;
+            self.backend.flush(key, entry.value()).await?;
             entry.value = Some(value);
         } else {
             self.ensure_free_entry(&mut map).await?;
@@ -401,7 +399,9 @@ impl<
             let key = *key;
             let object = Arc::clone(entry.value());
             trace!("Flushing {key:?}");
-            futs.push(Box::pin(self.backend.flush(key, object)));
+            futs.push(Box::pin(
+                async move { self.backend.flush(key, &object).await },
+            ));
         }
 
         let mut first_err = None;

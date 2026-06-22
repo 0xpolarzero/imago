@@ -47,7 +47,7 @@ impl<S: Storage> AsyncLruCacheBackend for L2CacheBackend<S> {
         .await
     }
 
-    async fn flush(&self, l2_cluster: HostCluster, l2_table: Arc<L2Table>) -> io::Result<()> {
+    async fn flush(&self, l2_cluster: HostCluster, l2_table: &L2Table) -> io::Result<()> {
         trace!("Flushing L2 table");
         if l2_table.is_modified() {
             assert!(l2_table.get_cluster().unwrap() == l2_cluster);
@@ -82,7 +82,7 @@ impl<S: Storage> AsyncLruCacheBackend for RefBlockCacheBackend<S> {
         RefBlock::load(self.file.as_ref(), &self.header, rb_cluster).await
     }
 
-    async fn flush(&self, rb_cluster: HostCluster, refblock: Arc<RefBlock>) -> io::Result<()> {
+    async fn flush(&self, rb_cluster: HostCluster, refblock: &RefBlock) -> io::Result<()> {
         if refblock.is_modified() {
             assert!(refblock.get_cluster().unwrap() == rb_cluster);
             refblock.write(self.file.as_ref()).await?;
