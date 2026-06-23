@@ -181,6 +181,20 @@ impl<S: Storage> MetadataCaches<S> {
         Ok(())
     }
 
+    /// Flush both L2 and refblock cache to disk.
+    pub async fn flush_all(&self) -> io::Result<()> {
+        let dir = self.direction.read().await;
+        if *dir == CacheDependency::L2DependsOnRb {
+            self.rb.flush().await?;
+            self.l2.flush().await?;
+        } else {
+            self.l2.flush().await?;
+            self.rb.flush().await?;
+        }
+
+        Ok(())
+    }
+
     /// Retrieve an L2 table from the cache.
     ///
     /// See [`AsyncLruCache::get_or_insert()`] for details.
@@ -223,15 +237,6 @@ impl<S: Storage> MetadataCaches<S> {
         }
 
         Ok(())
-    }
-
-    /// Flush the L2 cache to disk.
-    pub async fn flush_l2(&self) -> io::Result<()> {
-        let dir = self.direction.read().await;
-        if *dir == CacheDependency::L2DependsOnRb {
-            self.rb.flush().await?;
-        }
-        self.l2.flush().await
     }
 
     /// Invalidate the L2 cache.

@@ -172,11 +172,6 @@ impl<S: Storage> Allocator<S> {
         })
     }
 
-    /// Flush the refcount block cache.
-    pub async fn flush_rb_cache(&self) -> io::Result<()> {
-        self.caches.flush_rb().await
-    }
-
     /// Invaidate the refcount block cache.
     ///
     /// # Safety
