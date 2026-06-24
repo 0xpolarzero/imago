@@ -6,15 +6,15 @@
 pub mod drivers;
 pub mod ext;
 
-use crate::io_buffers::{IoVector, IoVectorMut};
+use crate::io_buffers::{IoBuffer, IoVector, IoVectorMut};
 use drivers::CommonStorageHelper;
 use std::any::Any;
 use std::fmt::{Debug, Display};
 use std::future::Future;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::{cmp, io};
 
 /// Parameters from which a storage object can be constructed.
 #[derive(Clone, Debug, Default)]
@@ -111,13 +111,17 @@ pub trait Storage: Debug + Display + Send + Sized + Sync {
     }
 
     /// Minimum required alignment for zero writes.
+    ///
+    /// Must be a multiple of [`Self::req_align()`].
     fn zero_align(&self) -> usize {
-        1
+        self.req_align()
     }
 
     /// Minimum required alignment for effective discards.
+    ///
+    /// Must be a multiple of [`Self::req_align()`].
     fn discard_align(&self) -> usize {
-        1
+        self.req_align()
     }
 
     /// Storage object length.
@@ -177,8 +181,13 @@ pub trait Storage: Debug + Display + Send + Sized + Sync {
 
     /// Ensure the given range reads back as zeroes.
     ///
-    /// The default implementation writes actual zeroes as data, which is inefficient.  Storage
-    /// drivers should override it with a more efficient implementation.
+    /// The default implementation writes actual zeroes as data via [`Storage::pure_writev()`],
+    /// which is inefficient.  Storage drivers should override it with a more efficient
+    /// implementation.
+    ///
+    /// Because the default implementation uses [`Storage::pure_writev()`], offset and length
+    /// must also be aligned to [`Self::req_align()`].  Implementations that support
+    /// finer-grained zeroing (e.g. via `fallocate`) should override this method.
     ///
     /// # Safety
     /// This is a pure write to storage.  The request must be fully aligned to
@@ -188,13 +197,18 @@ pub trait Storage: Debug + Display + Send + Sized + Sync {
     /// Use [`StorageExt::write_zeroes()`](crate::StorageExt::write_zeroes()) instead.
     #[allow(async_fn_in_trait)] // No need for Send
     async unsafe fn pure_write_zeroes(&self, offset: u64, length: u64) -> io::Result<()> {
-        ext::write_full_zeroes(self, offset, length).await
+        unsafe { pure_write_full_zeroes(self, offset, length).await }
     }
 
     /// Ensure the given range is allocated, and reads back as zeroes.
     ///
-    /// The default implementation writes actual zeroes as data, which is inefficient.  Storage
-    /// drivers should override it with a more efficient implementation.
+    /// The default implementation writes actual zeroes as data via [`Storage::pure_writev()`],
+    /// which is inefficient.  Storage drivers should override it with a more efficient
+    /// implementation.
+    ///
+    /// Because the default implementation uses [`Storage::pure_writev()`], offset and length
+    /// must also be aligned to [`Self::req_align()`].  Implementations that support
+    /// finer-grained zeroing (e.g. via `fallocate`) should override this method.
     ///
     /// # Safety
     /// This is a pure write to storage.  The request must be fully aligned to
@@ -205,7 +219,7 @@ pub trait Storage: Debug + Display + Send + Sized + Sync {
     /// instead.
     #[allow(async_fn_in_trait)] // No need for Send
     async unsafe fn pure_write_allocated_zeroes(&self, offset: u64, length: u64) -> io::Result<()> {
-        ext::write_full_zeroes(self, offset, length).await
+        unsafe { pure_write_full_zeroes(self, offset, length).await }
     }
 
     /// Discard the given range, with undefined contents when read back.
@@ -874,4 +888,48 @@ impl Default for StorageCreateOptions {
             overwrite: false,
         }
     }
+}
+
+/// Write zero data to the given area.
+///
+/// Like [`ext::write_full_zeroes()`], this will actually write zero data, fully allocated.
+///
+/// # Safety
+/// This is a pure write to storage.  The request must be fully aligned to
+/// [`Storage::req_align()`], and safeguards we want to implement for safe concurrent access may
+/// not be available.
+///
+/// To be used as the default implementation of [`Storage::pure_write_zeroes()`] and
+/// [`Storage::pure_write_allocated_zeroes()`].
+async unsafe fn pure_write_full_zeroes<S: Storage>(
+    storage: S,
+    mut offset: u64,
+    mut length: u64,
+) -> io::Result<()> {
+    let req_align = storage.req_align() as u64;
+    if !(offset | length).is_multiple_of(req_align) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "write_zeroes fallback: offset/length not aligned to request alignment",
+        ));
+    }
+
+    let mem_align = storage.mem_align() as u64;
+    let max_chunk_len = cmp::max(cmp::max(req_align, mem_align), 1048576);
+    let buflen = cmp::min(length, max_chunk_len) as usize;
+    let mut buf = IoBuffer::new(buflen, storage.mem_align())?;
+    buf.as_mut().into_slice().fill(0);
+
+    while length > 0 {
+        let chunk_len = cmp::min(length, max_chunk_len) as usize;
+        unsafe {
+            storage
+                .pure_writev(buf.as_ref_range(0..chunk_len).into(), offset)
+                .await
+        }?;
+        offset += chunk_len as u64;
+        length -= chunk_len as u64;
+    }
+
+    Ok(())
 }

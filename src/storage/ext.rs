@@ -319,15 +319,17 @@ pub(crate) async fn write_full_zeroes<S: StorageExt>(
     mut offset: u64,
     mut length: u64,
 ) -> io::Result<()> {
-    let buflen = cmp::min(length, 1048576) as usize;
-    let mut buf = IoBuffer::new(buflen, storage.mem_align())?;
-    buf.as_mut().into_slice().fill(0);
-
     let req_align = storage.req_align();
     let req_align_mask = (req_align - 1) as u64;
 
+    let mem_align = storage.mem_align();
+    let max_chunk_len = cmp::max(cmp::max(req_align, mem_align), 1048576) as u64;
+    let buflen = cmp::min(length, max_chunk_len) as usize;
+    let mut buf = IoBuffer::new(buflen, storage.mem_align())?;
+    buf.as_mut().into_slice().fill(0);
+
     while length > 0 {
-        let mut chunk_length = cmp::min(length, 1048576) as usize;
+        let mut chunk_length = cmp::min(length, max_chunk_len) as usize;
         if offset & req_align_mask != 0 {
             chunk_length = cmp::min(chunk_length, req_align - (offset & req_align_mask) as usize);
         }
@@ -356,6 +358,10 @@ pub(crate) async fn write_efficient_zeroes<S: StorageExt>(
     length: u64,
     allocate: bool,
 ) -> io::Result<()> {
+    if length == 0 {
+        return Ok(());
+    }
+
     let zero_align = storage.zero_align();
     debug_assert!(zero_align.is_power_of_two());
     let align_mask = zero_align as u64 - 1;
@@ -393,29 +399,41 @@ pub(crate) async fn write_efficient_zeroes<S: StorageExt>(
     }
 
     let zero_buf = if aligned_offset > offset || aligned_end < unaligned_end {
-        let mut buf = IoBuffer::new(
-            cmp::max(aligned_offset - offset, unaligned_end - aligned_end) as usize,
-            storage.mem_align(),
-        )?;
+        let buflen = if aligned_offset >= aligned_end {
+            unaligned_end - offset
+        } else {
+            cmp::max(aligned_offset - offset, unaligned_end - aligned_end)
+        };
+        let mut buf = IoBuffer::new(buflen as usize, storage.mem_align())?;
         buf.as_mut().into_slice().fill(0);
         Some(buf)
     } else {
         None
     };
 
-    if aligned_offset > offset {
+    if aligned_offset >= aligned_end {
         let buf = zero_buf
             .as_ref()
             .unwrap()
-            .as_ref_range(0..((aligned_offset - offset) as usize));
+            .as_ref_range(0..((unaligned_end - offset) as usize));
         storage.write(buf, offset).await?;
-    }
-    if aligned_end < unaligned_end {
-        let buf = zero_buf
-            .as_ref()
-            .unwrap()
-            .as_ref_range(0..((unaligned_end - aligned_end) as usize));
-        storage.write(buf, aligned_end).await?;
+    } else {
+        if aligned_offset > offset {
+            assert!(aligned_offset <= unaligned_end);
+            let buf = zero_buf
+                .as_ref()
+                .unwrap()
+                .as_ref_range(0..((aligned_offset - offset) as usize));
+            storage.write(buf, offset).await?;
+        }
+        if aligned_end < unaligned_end {
+            assert!(aligned_end >= offset);
+            let buf = zero_buf
+                .as_ref()
+                .unwrap()
+                .as_ref_range(0..((unaligned_end - aligned_end) as usize));
+            storage.write(buf, aligned_end).await?;
+        }
     }
 
     Ok(())
