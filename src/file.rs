@@ -477,9 +477,9 @@ impl File {
         }
 
         #[cfg(not(target_os = "macos"))]
-        let (zero_align, discard_align) = (1, 1);
+        let (mut zero_align, mut discard_align) = (1usize, 1usize);
         #[cfg(target_os = "macos")]
-        let (zero_align, discard_align) = {
+        let (mut zero_align, mut discard_align) = {
             let mut statfs: libc::statfs = unsafe { std::mem::zeroed() };
             // Safe: FD is valid, passed pointer is valid and its type matches the call.
             match while_eintr(|| unsafe { libc::fstatfs(file.as_raw_fd(), &mut statfs) }) {
@@ -487,6 +487,14 @@ impl File {
                 Err(_) => (page_size, page_size),
             }
         };
+
+        // Double-check to make absolutely sure both are powers of two
+        if !zero_align.is_power_of_two() {
+            zero_align = page_size;
+        }
+        if !discard_align.is_power_of_two() {
+            discard_align = page_size;
+        }
 
         let mut writable = true;
 
