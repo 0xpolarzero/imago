@@ -112,6 +112,14 @@ impl<T: Debug + Default + Display + Send + Sync, S: Storage> Storage for Annotat
         self.inner.req_align()
     }
 
+    fn zero_align(&self) -> usize {
+        self.inner.zero_align()
+    }
+
+    fn discard_align(&self) -> usize {
+        self.inner.discard_align()
+    }
+
     fn size(&self) -> io::Result<u64> {
         self.inner.size()
     }
@@ -137,6 +145,11 @@ impl<T: Debug + Default + Display + Send + Sync, S: Storage> Storage for Annotat
     async unsafe fn pure_write_zeroes(&self, offset: u64, length: u64) -> io::Result<()> {
         // Caller guarantees safety
         unsafe { self.inner.pure_write_zeroes(offset, length) }.await
+    }
+
+    async unsafe fn pure_write_allocated_zeroes(&self, offset: u64, length: u64) -> io::Result<()> {
+        // Caller guarantees safety
+        unsafe { self.inner.pure_write_allocated_zeroes(offset, length) }.await
     }
 
     async unsafe fn pure_discard(&self, offset: u64, length: u64) -> io::Result<()> {
