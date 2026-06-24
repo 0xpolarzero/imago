@@ -3,7 +3,6 @@
 //! Functionality for allocating single clusters and ranges of clusters, and general handling of
 //! refcount structures.
 
-use super::cache::RefBlockCacheBackend;
 use super::*;
 use std::mem;
 use tokio::sync::MutexGuard;
@@ -23,8 +22,8 @@ pub(super) struct Allocator<S: Storage> {
     /// Qcow2 image header.
     header: Arc<Header>,
 
-    /// Refblock cache.
-    rb_cache: AsyncLruCache<HostCluster, RefBlock, RefBlockCacheBackend<S>>,
+    /// L2 and refblock caches with dependency management.
+    caches: Arc<MetadataCaches<S>>,
 }
 
 impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
@@ -75,7 +74,7 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
             let mut allocator = self.allocator().await?;
 
             // Allocate clusters before setting up L2 entries
-            self.l2_cache.depend_on(&allocator.rb_cache).await?;
+            self.caches.l2_depends_on_rb().await?;
 
             allocator.allocate_clusters(ClusterCount(1), None).await
         }
@@ -104,7 +103,7 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
             let mut allocator = self.allocator().await?;
 
             // Allocate clusters before setting up L2 entries
-            self.l2_cache.depend_on(&allocator.rb_cache).await?;
+            self.caches.l2_depends_on_rb().await?;
 
             let cluster = allocator
                 .allocate_cluster_at(mandatory_host_cluster)
@@ -131,9 +130,9 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
     pub(super) async fn free_data_clusters(&self, cluster: HostCluster, count: ClusterCount) {
         if !self.header.external_data_file() {
             if let Ok(mut allocator) = self.allocator().await {
-                // Clear L2 entries before deallocating clusters
-                if let Err(err) = allocator.rb_cache.depend_on(&self.l2_cache).await {
-                    warn!("Leaking clusters; cannot set up cache inter-dependency with L2 cache: {err}");
+                // Clear L2 entries before deallocating cluster
+                if let Err(err) = self.caches.rb_depends_on_l2().await {
+                    warn!("Leaking clusters; cannot set up cache dependency: {err}");
                     return;
                 }
 
@@ -145,7 +144,11 @@ impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
 
 impl<S: Storage> Allocator<S> {
     /// Create a new allocator for the given image file.
-    pub async fn new(image: Arc<S>, header: Arc<Header>) -> io::Result<Self> {
+    pub async fn new(
+        image: Arc<S>,
+        header: Arc<Header>,
+        caches: Arc<MetadataCaches<S>>,
+    ) -> io::Result<Self> {
         let cb = header.cluster_bits();
         let rt_offset = header.reftable_offset();
         let rt_cluster = rt_offset
@@ -160,21 +163,13 @@ impl<S: Storage> Allocator<S> {
         )
         .await?;
 
-        let rb_cache_backend = RefBlockCacheBackend::new(Arc::clone(&image), Arc::clone(&header));
-        let rb_cache = AsyncLruCache::new(rb_cache_backend, 32);
-
         Ok(Allocator {
             file: image,
             reftable,
             first_free_cluster: HostCluster(0),
             header,
-            rb_cache,
+            caches,
         })
-    }
-
-    /// Flush the refcount block cache.
-    pub async fn flush_rb_cache(&self) -> io::Result<()> {
-        self.rb_cache.flush().await
     }
 
     /// Invaidate the refcount block cache.
@@ -183,7 +178,7 @@ impl<S: Storage> Allocator<S> {
     /// May cause image corruption, you must guarantee the on-disk state is consistent.
     pub async unsafe fn invalidate_rb_cache(&self) -> io::Result<()> {
         // Safe: Caller says so.
-        unsafe { self.rb_cache.invalidate() }.await
+        unsafe { self.caches.invalidate_rb() }.await
     }
 
     /// Allocate clusters in the image file.
@@ -307,7 +302,7 @@ impl<S: Storage> Allocator<S> {
                 invalid_data(format!("Unaligned refcount block with index {rt_index}; refcount table entry: {rt_entry:?}"))
             })?;
 
-            self.rb_cache.get_or_insert(rb_cluster).await.map(Some)
+            self.caches.rb_get_or_insert(rb_cluster).await.map(Some)
         } else {
             Ok(None)
         }
@@ -359,8 +354,8 @@ impl<S: Storage> Allocator<S> {
             .await?;
 
         let new_rb = Arc::new(new_rb);
-        self.rb_cache
-            .insert(new_rb.get_cluster().unwrap(), Arc::clone(&new_rb))
+        self.caches
+            .rb_insert(new_rb.get_cluster().unwrap(), Arc::clone(&new_rb))
             .await?;
         Ok(new_rb)
     }
@@ -405,7 +400,7 @@ impl<S: Storage> Allocator<S> {
                 invalid_data(format!("Unaligned refcount block with index {rt_index}; refcount table entry: {rt_entry:?}"))
             })?;
 
-            let rb = self.rb_cache.get_or_insert(rb_cluster).await?;
+            let rb = self.caches.rb_get_or_insert(rb_cluster).await?;
             for i in rb_index..rb_entries {
                 if rb.is_zero(i) {
                     let index = HostCluster::from_ref_indices(rt_index, i, rb_bits);
@@ -438,7 +433,7 @@ impl<S: Storage> Allocator<S> {
             if let Some(rb_offset) = new_rt.get(rt_i).refblock_offset() {
                 // Checked in the loop above
                 let rb_cluster = rb_offset.checked_cluster(cb).unwrap();
-                let rb = self.rb_cache.get_or_insert(rb_cluster).await?;
+                let rb = self.caches.rb_get_or_insert(rb_cluster).await?;
                 refblocks.push(rb);
                 continue;
             }
@@ -447,7 +442,7 @@ impl<S: Storage> Allocator<S> {
             rb.set_cluster(index);
             new_rt.enter_refblock(rt_i, &rb)?;
             let rb = Arc::new(rb);
-            self.rb_cache.insert(index, Arc::clone(&rb)).await?;
+            self.caches.rb_insert(index, Arc::clone(&rb)).await?;
             refblocks.push(rb);
             index += ClusterCount(1);
             count -= ClusterCount(1);
@@ -477,7 +472,7 @@ impl<S: Storage> Allocator<S> {
         // Any errors from here on may lead to leaked clusters if there are refblocks in
         // `refblocks` that are already part of the old reftable.
         // TODO: Try to clean that up, though it seems quite hard for little gain.
-        self.rb_cache.flush().await?;
+        self.caches.flush_rb().await?;
         new_rt.write(self.file.as_ref()).await?;
 
         self.header.set_reftable(&new_rt)?;

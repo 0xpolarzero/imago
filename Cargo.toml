@@ -38,7 +38,7 @@ windows-sys = { version = "0.61", features = [
 all-features = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [features]
 default = []

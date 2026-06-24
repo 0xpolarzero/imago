@@ -254,7 +254,7 @@ impl<S: Storage, F: WrappedFormat<S>> Qcow2<S, F> {
                 ))
             })?;
 
-            self.l2_cache.get_or_insert(l2_cluster).await.map(Some)
+            self.caches.l2_get_or_insert(l2_cluster).await.map(Some)
         } else {
             Ok(None)
         }
@@ -287,7 +287,7 @@ impl<S: Storage, F: WrappedFormat<S>> Qcow2<S, F> {
                 ))
             })?;
 
-            let l2 = self.l2_cache.get_or_insert(l2_cluster).await?;
+            let l2 = self.caches.l2_get_or_insert(l2_cluster).await?;
             if l1_entry.is_copied() {
                 return Ok(l2);
             }
@@ -313,8 +313,8 @@ impl<S: Storage, F: WrappedFormat<S>> Qcow2<S, F> {
         }
 
         let l2_table = Arc::new(l2_table);
-        self.l2_cache
-            .insert(l2_cluster, Arc::clone(&l2_table))
+        self.caches
+            .l2_insert(l2_cluster, Arc::clone(&l2_table))
             .await?;
         Ok(l2_table)
     }

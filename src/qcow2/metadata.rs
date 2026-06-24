@@ -2282,6 +2282,32 @@ impl RefBlock {
         })
     }
 
+    /// Copy data from `self.raw_data` using the `get` function.
+    ///
+    /// `mem_align` is the minimum memory alignment for the returned buffer.
+    fn copy_raw_data<T: Copy + Sized, F: Fn(*const T) -> T>(
+        &self,
+        mem_align: usize,
+        get: F,
+    ) -> io::Result<IoBuffer> {
+        // Check that `T` is the right type
+        assert!(cmp::max((1 << self.refcount_order) / 8, 1) == size_of::<T>());
+
+        let byte_size = 1 << self.cluster_bits;
+        let mut buffer = IoBuffer::new(byte_size, cmp::max(mem_align, size_of::<T>()))?;
+
+        // Safe because this is the right access type
+        let raw_in = unsafe { self.raw_data.as_ref().into_typed_slice::<T>() };
+        // Safe because we have just allocated this, and it fits the alignment
+        let raw_out = unsafe { buffer.as_mut().into_typed_slice::<T>() };
+
+        for (i, value) in raw_in.iter().enumerate() {
+            raw_out[i] = get(value as *const T);
+        }
+
+        Ok(buffer)
+    }
+
     /// Write a refcount block to disk.
     pub async fn write<S: Storage>(&self, image: &S) -> io::Result<()> {
         let offset = self
@@ -2289,7 +2315,36 @@ impl RefBlock {
             .ok_or_else(|| io::Error::other("Cannot write qcow2 refcount block, no offset set"))?;
 
         self.clear_modified();
-        if let Err(err) = image.write(self.raw_data.as_ref(), offset.0).await {
+
+        let buffer = match self.refcount_order {
+            // refcount_bits == 1, 2, 4, 8
+            0..=3 => self.copy_raw_data::<u8, _>(image.mem_align(), |ptr| {
+                // Safe because we only read
+                unsafe { AtomicU8::from_ptr(ptr as *mut u8) }.load(Ordering::Relaxed)
+            })?,
+
+            // refcount_bits == 16
+            4 => self.copy_raw_data::<u16, _>(image.mem_align(), |ptr| {
+                // Safe because we only read
+                unsafe { AtomicU16::from_ptr(ptr as *mut u16) }.load(Ordering::Relaxed)
+            })?,
+
+            // refcount_bits == 32
+            5 => self.copy_raw_data::<u32, _>(image.mem_align(), |ptr| {
+                // Safe because we only read
+                unsafe { AtomicU32::from_ptr(ptr as *mut u32) }.load(Ordering::Relaxed)
+            })?,
+
+            // refcount_bits == 64
+            6 => self.copy_raw_data::<u64, _>(image.mem_align(), |ptr| {
+                // Safe because we only read
+                unsafe { AtomicU64::from_ptr(ptr as *mut u64) }.load(Ordering::Relaxed)
+            })?,
+
+            _ => unreachable!(),
+        };
+
+        if let Err(err) = image.write(&buffer, offset.0).await {
             self.set_modified();
             return Err(err);
         }
