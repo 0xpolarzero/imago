@@ -84,13 +84,19 @@ impl CommonStorageHelper {
     pub async fn weak_write_blocker(&self, range: Range<u64>) -> RangeBlockedGuard<'_> {
         let mut intersecting = FutureVector::new();
 
-        let range_block = {
+        // Create `RangeBlockedGuard` before the `await` below, so if the future is dropped,
+        // `RangeBlockedGuard::drop()` will run, removing the blocker from the list
+        let guard = {
             // Consistent ordering to avoid deadlock: Always acquire weak before strong
             let mut weak = self.weak_write_blockers.write().unwrap();
             let strong = self.strong_write_blockers.read().unwrap();
 
             strong.collect_intersecting_await_futures(&range, &mut intersecting);
-            weak.block(range)
+
+            RangeBlockedGuard {
+                list: &self.weak_write_blockers,
+                block: Some(weak.block(range)),
+            }
         };
 
         // `RecvError` means the blocker's guard was dropped without signaling, so the blocking
@@ -98,10 +104,7 @@ impl CommonStorageHelper {
         // other overlapping blockers, so drain until all are actually done, ignoring errors.
         while intersecting.discarding_join().await.is_err() {}
 
-        RangeBlockedGuard {
-            list: &self.weak_write_blockers,
-            block: Some(range_block),
-        }
+        guard
     }
 
     /// Await any concurrent write request for the given range.
@@ -111,14 +114,20 @@ impl CommonStorageHelper {
     pub async fn strong_write_blocker(&self, range: Range<u64>) -> RangeBlockedGuard<'_> {
         let mut intersecting = FutureVector::new();
 
-        let range_block = {
+        // Create `RangeBlockedGuard` before the `await` below, so if the future is dropped,
+        // `RangeBlockedGuard::drop()` will run, removing the blocker from the list
+        let guard = {
             // Consistent ordering to avoid deadlock: Always acquire weak before strong
             let weak = self.weak_write_blockers.read().unwrap();
             let mut strong = self.strong_write_blockers.write().unwrap();
 
             weak.collect_intersecting_await_futures(&range, &mut intersecting);
             strong.collect_intersecting_await_futures(&range, &mut intersecting);
-            strong.block(range)
+
+            RangeBlockedGuard {
+                list: &self.strong_write_blockers,
+                block: Some(strong.block(range)),
+            }
         };
 
         // `RecvError` means the blocker's guard was dropped without signaling, so the blocking
@@ -126,10 +135,7 @@ impl CommonStorageHelper {
         // other overlapping blockers, so drain until all are actually done, ignoring errors.
         while intersecting.discarding_join().await.is_err() {}
 
-        RangeBlockedGuard {
-            list: &self.strong_write_blockers,
-            block: Some(range_block),
-        }
+        guard
     }
 }
 
