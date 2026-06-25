@@ -8,15 +8,15 @@ repository = "https://gitlab.com/hreitz/imago"
 readme = "README.md"
 
 [dependencies]
-async-trait = "0.1"
+async-trait = { version = "0.1", optional = true }
 bincode = { version = "2", features = ["derive"], default-features = false }
 cfg-if = "1"
-futures = { version = "0.3", features = ["alloc"], default-features = false }
+futures = { version = "0.3", features = ["alloc"], default-features = false, optional = true }
 maybe-async = "0.2"
 miniz_oxide = { version = "0.8", features = ["std"] }
 nix = { version = "0.30", features = ["ioctl"] }
 page_size = "0.6"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync"], optional = true }
 tracing = { version = "0.1", features = ["attributes"] }
 vm-memory = { version = ">=0.16, <0.19", optional = true, default-features = false }
 
@@ -45,7 +45,8 @@ tokio = { version = "1", features = ["rt", "macros"] }
 [features]
 default = ["async"]
 # async-drop = []
-async = []
+async = ["dep:tokio", "dep:async-trait", "dep:futures"]
+sync = ["maybe-async/is_sync"]
 sync-wrappers = ["async", "tokio/rt"]
 vm-memory = ["dep:vm-memory"]
 

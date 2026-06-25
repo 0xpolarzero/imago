@@ -76,21 +76,29 @@
 //!
 //! # Flushing
 //!
-//! Given that `AsyncDrop` is not stable yet (and probably will not be stable for a long time),
-//! callers must ensure that images are properly flushed before dropping them, i.e. call
-//! `.flush().await` on any image that is not read-only.
+//! In async mode, given that `AsyncDrop` is not stable yet (and probably will not be stable for a
+//! long time), callers must ensure that images are properly flushed before dropping them, i.e.
+//! call `.flush().await` on any image that is not read-only.
 //!
-//! (The synchronous wrapper [`SyncFormatAccess`] does perform a synchronous flush in its `Drop`
+//! (The synchronous wrapper `SyncFormatAccess` does perform a synchronous flush in its `Drop`
 //! implementation.)
+//!
+//! In sync mode, [`FormatAccess`] implements `Drop` and flushes automatically.
 //!
 //! # Features
 //!
 //! - `async` *(default)*: Build with `async` support, which requires `tokio` (for async locking),
 //!   `async-trait`, and `futures`.
 //!
+//! - `sync`: Build as a fully synchronous library, with no `async`, no `tokio` dependency.  All
+//!   I/O methods become plain `fn`.  Enable via
+//!   `imago = { default-features = false, features = ["sync"] }`.
+//!   Incompatible with `sync-wrappers`.
+//!
 //! - `sync-wrappers`: Provide synchronous wrappers for the native `async` interface.  Note that
-//!   these build a `tokio` runtime in which they run the `async` functions, so using the `async`
-//!   interface is definitely preferred.
+//!   these build a `tokio` runtime in which they run the `async` functions, so prefer using `sync`
+//!   instead, which provides native synchronous methods without the `tokio` overhead.
+//!   Incompatible with `sync`, and planned to be deprecated in the future.
 //!
 //! - `vm-memory`: Provide conversion functions
 //!   [`IoVector::from_volatile_slice`](io_buffers::IoVector::from_volatile_slice) and
@@ -99,6 +107,15 @@
 
 #[cfg(not(any(feature = "async", feature = "sync")))]
 compile_error!("Either the `async` feature (included in defaults) or `sync` must be enabled!");
+
+#[cfg(all(feature = "sync-wrappers", feature = "sync"))]
+compile_error!("The `sync` feature conflicts with `sync-wrappers`. Consider using `sync` alone.");
+
+#[cfg(all(feature = "async", feature = "sync"))]
+compile_error!(
+    "The `async` and `sync` features are mutually exclusive. \
+    `async` is in defaults, so use `--no-default-features --features=sync` for sync mode."
+);
 
 pub mod annotated;
 mod async_lru_cache;
