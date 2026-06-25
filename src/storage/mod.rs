@@ -324,7 +324,7 @@ pub trait DynStorage: Any + Debug + Display + Send + Sync {
     /// Object-safe wrapper around [`Storage::pure_readv()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::pure_readv()`] apply.
+    /// Same considerations as for [`Storage::pure_readv()`] apply.
     unsafe fn dyn_pure_readv<'a>(
         &'a self,
         bufv: IoVectorMut<'a>,
@@ -334,7 +334,7 @@ pub trait DynStorage: Any + Debug + Display + Send + Sync {
     /// Object-safe wrapper around [`Storage::pure_writev()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::pure_writev()`] apply.
+    /// Same considerations as for [`Storage::pure_writev()`] apply.
     unsafe fn dyn_pure_writev<'a>(
         &'a self,
         bufv: IoVector<'a>,
@@ -344,7 +344,7 @@ pub trait DynStorage: Any + Debug + Display + Send + Sync {
     /// Object-safe wrapper around [`Storage::pure_write_zeroes()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::pure_write_zeroes()`] apply.
+    /// Same considerations as for [`Storage::pure_write_zeroes()`] apply.
     unsafe fn dyn_pure_write_zeroes(
         &self,
         offset: u64,
@@ -354,7 +354,7 @@ pub trait DynStorage: Any + Debug + Display + Send + Sync {
     /// Object-safe wrapper around [`Storage::pure_write_allocated_zeroes()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::pure_write_allocated_zeroes()`] apply.
+    /// Same considerations as for [`Storage::pure_write_allocated_zeroes()`] apply.
     unsafe fn dyn_pure_write_allocated_zeroes(
         &self,
         offset: u64,
@@ -364,7 +364,7 @@ pub trait DynStorage: Any + Debug + Display + Send + Sync {
     /// Object-safe wrapper around [`Storage::pure_discard()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::pure_discard()`] apply.
+    /// Same considerations as for [`Storage::pure_discard()`] apply.
     unsafe fn dyn_pure_discard(
         &self,
         offset: u64,
@@ -380,13 +380,13 @@ pub trait DynStorage: Any + Debug + Display + Send + Sync {
     /// Object-safe wrapper around [`Storage::invalidate_cache()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::invalidate_cache()`] apply.
+    /// Same considerations as for [`Storage::invalidate_cache()`] apply.
     unsafe fn dyn_invalidate_cache(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + '_>>;
 
     /// Wrapper around [`Storage::get_storage_helper()`].
     fn dyn_get_storage_helper(&self) -> &CommonStorageHelper;
 
-    /// Wrapper around [`Storage::resize()`].
+    /// Object-safe wrapper around [`Storage::resize()`].
     fn dyn_resize(
         &self,
         new_size: u64,
