@@ -1093,7 +1093,9 @@ impl HeaderExtension {
 
     /// Creates a [`Self::FeatureNameTable`].
     fn feature_name_table() -> Self {
-        use {AutoclearFeatures as A, CompatibleFeatures as C, IncompatibleFeatures as I};
+        use AutoclearFeatures as A;
+        use CompatibleFeatures as C;
+        use IncompatibleFeatures as I;
 
         let mut map = HashMap::new();
 
