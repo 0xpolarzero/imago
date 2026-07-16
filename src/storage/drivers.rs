@@ -17,6 +17,14 @@ use tokio::sync::oneshot::{self, Sender};
 /// State such as write blockers needs to be kept somewhere, and instead of introducing a wrapper
 /// (that might be bypassed), we store it directly in the [`Storage`](crate::Storage) objects so it
 /// cannot be bypassed (at least when using the [`StorageExt`](crate::StorageExt) methods).
+///
+/// Async note: Overlapping write blockers from different async tasks are safe (the awaiting task
+/// yields, letting the holding task make progress).  Same-task overlap still deadlocks, as the
+/// task cannot drop its guard while suspended.
+///
+/// Sync note: Unlike in async mode, write blocker acquisition must not be nested on the same
+/// thread.  Acquiring a blocker while already holding an overlapping one will deadlock on
+/// `recv()`, because the existing blocker can only be released by the same (now blocked) thread.
 #[derive(Debug, Default)]
 pub struct CommonStorageHelper {
     /// Current in-flight write that allow concurrent writes to the same region.
@@ -63,6 +71,10 @@ struct RangeBlocked {
     ///
     /// Only access under `blocked` lock!
     index: AtomicUsize,
+
+    /// For debugging only: Thread that created this blocker, for reentrancy detection.
+    #[cfg(all(feature = "sync", debug_assertions))]
+    owner_thread: std::thread::ThreadId,
 }
 
 /// Keeps a `RangeBlocked` alive.
@@ -88,6 +100,9 @@ impl CommonStorageHelper {
     /// write.  Await such intersecting concurrent write requests, and return a guard that will
     /// delay such new writes until the guard is dropped.
     pub async fn weak_write_blocker(&self, range: Range<u64>) -> RangeBlockedGuard<'_> {
+        #[cfg(all(feature = "sync", debug_assertions))]
+        Self::assert_no_same_thread_overlap(&self.strong_write_blockers, &range);
+
         #[cfg(feature = "async")]
         let mut intersecting = FuturesUnordered::new();
         #[cfg(feature = "sync")]
@@ -126,6 +141,12 @@ impl CommonStorageHelper {
     /// Block the given range for any concurrent write requests until the returned guard object is
     /// dropped.  Existing requests are awaited, and new ones will be delayed.
     pub async fn strong_write_blocker(&self, range: Range<u64>) -> RangeBlockedGuard<'_> {
+        #[cfg(all(feature = "sync", debug_assertions))]
+        {
+            Self::assert_no_same_thread_overlap(&self.weak_write_blockers, &range);
+            Self::assert_no_same_thread_overlap(&self.strong_write_blockers, &range);
+        }
+
         #[cfg(feature = "async")]
         let mut intersecting = FuturesUnordered::new();
         #[cfg(feature = "sync")]
@@ -158,6 +179,30 @@ impl CommonStorageHelper {
         }
 
         guard
+    }
+
+    /// Panic if the current thread already holds a blocker in `list` that overlaps `range`.
+    ///
+    /// In sync mode, blocking on `recv()` to wait for an overlapping blocker held by the same
+    /// thread would deadlock, because that blocker can only be released by this (now blocked)
+    /// thread.  This check runs before any locks are acquired so that a panic does not poison
+    /// them, allowing already-held guards to drop cleanly during unwinding.
+    #[cfg(all(feature = "sync", debug_assertions))]
+    fn assert_no_same_thread_overlap(
+        list: &std::sync::RwLock<RangeBlockedList>,
+        range: &Range<u64>,
+    ) {
+        let list = list.read().unwrap();
+        let current = std::thread::current().id();
+        for rb in &list.blocked {
+            if rb.range.overlaps(range) && rb.owner_thread == current {
+                panic!(
+                    "Same-thread reentrancy: already holding write blocker for {:?}, \
+                     acquiring overlapping blocker for {range:?} would deadlock",
+                    rb.range,
+                );
+            }
+        }
     }
 }
 
@@ -194,6 +239,8 @@ impl RangeBlockedList {
             range,
             waitlist: Default::default(),
             index: self.blocked.len().into(),
+            #[cfg(all(feature = "sync", debug_assertions))]
+            owner_thread: std::thread::current().id(),
         });
         self.blocked.push(Arc::clone(&range_block));
         range_block
@@ -221,5 +268,48 @@ impl Drop for RangeBlockedGuard<'_> {
             // ignore that
             let _ = waiting.send(());
         }
+    }
+}
+
+#[cfg(all(feature = "sync", test, debug_assertions))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "Same-thread reentrancy: already holding write blocker")]
+    fn test_weak_then_overlapping_strong() {
+        let helper = CommonStorageHelper::default();
+        let _weak = helper.weak_write_blocker(0..100);
+        let _strong = helper.strong_write_blocker(50..150);
+    }
+
+    #[test]
+    #[should_panic(expected = "Same-thread reentrancy: already holding write blocker")]
+    fn test_strong_then_overlapping_strong() {
+        let helper = CommonStorageHelper::default();
+        let _first = helper.strong_write_blocker(0..100);
+        let _second = helper.strong_write_blocker(50..150);
+    }
+
+    #[test]
+    #[should_panic(expected = "Same-thread reentrancy: already holding write blocker")]
+    fn test_strong_then_overlapping_weak() {
+        let helper = CommonStorageHelper::default();
+        let _strong = helper.strong_write_blocker(0..100);
+        let _weak = helper.weak_write_blocker(50..150);
+    }
+
+    #[test]
+    fn test_non_overlapping() {
+        let helper = CommonStorageHelper::default();
+        let _first = helper.weak_write_blocker(0..100);
+        let _second = helper.strong_write_blocker(100..200);
+    }
+
+    #[test]
+    fn test_weak_then_overlapping_weak() {
+        let helper = CommonStorageHelper::default();
+        let _first = helper.weak_write_blocker(0..100);
+        let _second = helper.weak_write_blocker(50..150);
     }
 }
