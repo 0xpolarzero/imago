@@ -8,10 +8,13 @@ pub mod ext;
 
 use crate::io_buffers::{IoBuffer, IoVector, IoVectorMut};
 use drivers::CommonStorageHelper;
+use maybe_async::maybe_async;
 use std::any::Any;
 use std::fmt::{Debug, Display};
+#[cfg(feature = "async")]
 use std::future::Future;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "async")]
 use std::pin::Pin;
 use std::sync::Arc;
 use std::{cmp, io};
@@ -52,6 +55,7 @@ pub struct StorageCreateOptions {
 }
 
 /// Implementation for storage objects.
+#[maybe_async(AFIT)]
 pub trait Storage: Debug + Display + Send + Sized + Sync {
     /// Open a storage object.
     ///
@@ -297,8 +301,10 @@ pub trait Storage: Debug + Display + Send + Sized + Sync {
 /// use of both `Box<StdFile>` and `Box<Null>` storage objects together.  (`Arc` instead of `Box`
 /// works, too.)
 ///
-/// Async functions in `DynStorage` return boxed futures (`Pin<Box<dyn Future>>`), which makes them
-/// slighly less efficient than async functions in `Storage`, hence the distinction.
+/// In async mode, async functions in `DynStorage` return boxed futures (`Pin<Box<dyn Future>>`),
+/// which makes them slightly less efficient than async functions in `Storage`, hence the
+/// distinction.  In sync mode, they return values directly, so there would be no need for this
+/// distinct trait, but we keep it for compatibility between sync and async.
 pub trait DynStorage: Any + Debug + Display + Send + Sync {
     /// Wrapper around [`Storage::mem_align()`].
     fn dyn_mem_align(&self) -> usize;
@@ -324,28 +330,63 @@ pub trait DynStorage: Any + Debug + Display + Send + Sync {
     /// Object-safe wrapper around [`Storage::pure_readv()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::pure_readv()`] apply.
+    /// Same considerations as for [`Storage::pure_readv()`] apply.
+    #[cfg(feature = "async")]
     unsafe fn dyn_pure_readv<'a>(
         &'a self,
         bufv: IoVectorMut<'a>,
         offset: u64,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + 'a>>;
 
+    /// Object-safe wrapper around [`Storage::pure_readv()`].
+    ///
+    /// # Safety
+    /// Same considerations as for [`Storage::pure_readv()`] apply.
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_pure_readv(&self, bufv: IoVectorMut<'_>, offset: u64) -> io::Result<()>;
+
     /// Object-safe wrapper around [`Storage::pure_writev()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::pure_writev()`] apply.
+    /// Same considerations as for [`Storage::pure_writev()`] apply.
+    #[cfg(feature = "async")]
     unsafe fn dyn_pure_writev<'a>(
         &'a self,
         bufv: IoVector<'a>,
         offset: u64,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + 'a>>;
 
+    /// Object-safe wrapper around [`Storage::pure_writev()`].
+    ///
+    /// # Safety
+    /// Same considerations as for [`Storage::pure_writev()`] apply.
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_pure_writev(&self, bufv: IoVector<'_>, offset: u64) -> io::Result<()>;
+
     /// Object-safe wrapper around [`Storage::pure_write_zeroes()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::pure_write_zeroes()`] apply.
+    /// Same considerations as for [`Storage::pure_write_zeroes()`] apply.
+    #[cfg(feature = "async")]
     unsafe fn dyn_pure_write_zeroes(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + '_>>;
+
+    /// Object-safe wrapper around [`Storage::pure_write_zeroes()`].
+    ///
+    /// # Safety
+    /// Same considerations as for [`Storage::pure_write_zeroes()`] apply.
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_pure_write_zeroes(&self, offset: u64, length: u64) -> io::Result<()>;
+
+    /// Object-safe wrapper around [`Storage::pure_write_allocated_zeroes()`].
+    ///
+    /// # Safety
+    /// Same considerations as for [`Storage::pure_write_allocated_zeroes()`] apply.
+    #[cfg(feature = "async")]
+    unsafe fn dyn_pure_write_allocated_zeroes(
         &self,
         offset: u64,
         length: u64,
@@ -354,8 +395,16 @@ pub trait DynStorage: Any + Debug + Display + Send + Sync {
     /// Object-safe wrapper around [`Storage::pure_write_allocated_zeroes()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::pure_write_allocated_zeroes()`] apply.
-    unsafe fn dyn_pure_write_allocated_zeroes(
+    /// Same considerations as for [`Storage::pure_write_allocated_zeroes()`] apply.
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_pure_write_allocated_zeroes(&self, offset: u64, length: u64) -> io::Result<()>;
+
+    /// Object-safe wrapper around [`Storage::pure_discard()`].
+    ///
+    /// # Safety
+    /// Same considerations as for [`Storage::pure_discard()`] apply.
+    #[cfg(feature = "async")]
+    unsafe fn dyn_pure_discard(
         &self,
         offset: u64,
         length: u64,
@@ -364,34 +413,54 @@ pub trait DynStorage: Any + Debug + Display + Send + Sync {
     /// Object-safe wrapper around [`Storage::pure_discard()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::pure_discard()`] apply.
-    unsafe fn dyn_pure_discard(
-        &self,
-        offset: u64,
-        length: u64,
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + '_>>;
+    /// Same considerations as for [`Storage::pure_discard()`] apply.
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_pure_discard(&self, offset: u64, length: u64) -> io::Result<()>;
 
     /// Object-safe wrapper around [`Storage::flush()`].
+    #[cfg(feature = "async")]
     fn dyn_flush(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + '_>>;
 
+    /// Object-safe wrapper around [`Storage::flush()`].
+    #[cfg(feature = "sync")]
+    fn dyn_flush(&self) -> io::Result<()>;
+
     /// Object-safe wrapper around [`Storage::sync()`].
+    #[cfg(feature = "async")]
     fn dyn_sync(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + '_>>;
+
+    /// Object-safe wrapper around [`Storage::sync()`].
+    #[cfg(feature = "sync")]
+    fn dyn_sync(&self) -> io::Result<()>;
 
     /// Object-safe wrapper around [`Storage::invalidate_cache()`].
     ///
     /// # Safety
-    /// Same considerations are for [`Storage::invalidate_cache()`] apply.
+    /// Same considerations as for [`Storage::invalidate_cache()`] apply.
+    #[cfg(feature = "async")]
     unsafe fn dyn_invalidate_cache(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + '_>>;
+
+    /// Object-safe wrapper around [`Storage::invalidate_cache()`].
+    ///
+    /// # Safety
+    /// Same considerations as for [`Storage::invalidate_cache()`] apply.
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_invalidate_cache(&self) -> io::Result<()>;
 
     /// Wrapper around [`Storage::get_storage_helper()`].
     fn dyn_get_storage_helper(&self) -> &CommonStorageHelper;
 
-    /// Wrapper around [`Storage::resize()`].
+    /// Object-safe wrapper around [`Storage::resize()`].
+    #[cfg(feature = "async")]
     fn dyn_resize(
         &self,
         new_size: u64,
         prealloc_mode: PreallocateMode,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + '_>>;
+
+    /// Object-safe wrapper around [`Storage::resize()`].
+    #[cfg(feature = "sync")]
+    fn dyn_resize(&self, new_size: u64, prealloc_mode: PreallocateMode) -> io::Result<()>;
 }
 
 /// Storage object preallocation modes.
@@ -423,6 +492,7 @@ pub enum PreallocateMode {
     WriteData,
 }
 
+#[maybe_async(AFIT)]
 impl<S: Storage> Storage for &S {
     fn mem_align(&self) -> usize {
         (*self).mem_align()
@@ -522,6 +592,7 @@ impl<S: Storage + 'static> DynStorage for S {
         <S as Storage>::get_filename(self)
     }
 
+    #[cfg(feature = "async")]
     unsafe fn dyn_pure_readv<'a>(
         &'a self,
         bufv: IoVectorMut<'a>,
@@ -530,6 +601,12 @@ impl<S: Storage + 'static> DynStorage for S {
         Box::pin(unsafe { <S as Storage>::pure_readv(self, bufv, offset) })
     }
 
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_pure_readv(&self, bufv: IoVectorMut<'_>, offset: u64) -> io::Result<()> {
+        unsafe { <S as Storage>::pure_readv(self, bufv, offset) }
+    }
+
+    #[cfg(feature = "async")]
     unsafe fn dyn_pure_writev<'a>(
         &'a self,
         bufv: IoVector<'a>,
@@ -538,6 +615,12 @@ impl<S: Storage + 'static> DynStorage for S {
         Box::pin(unsafe { <S as Storage>::pure_writev(self, bufv, offset) })
     }
 
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_pure_writev(&self, bufv: IoVector<'_>, offset: u64) -> io::Result<()> {
+        unsafe { <S as Storage>::pure_writev(self, bufv, offset) }
+    }
+
+    #[cfg(feature = "async")]
     unsafe fn dyn_pure_write_zeroes(
         &self,
         offset: u64,
@@ -546,6 +629,12 @@ impl<S: Storage + 'static> DynStorage for S {
         Box::pin(unsafe { <S as Storage>::pure_write_zeroes(self, offset, length) })
     }
 
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_pure_write_zeroes(&self, offset: u64, length: u64) -> io::Result<()> {
+        unsafe { <S as Storage>::pure_write_zeroes(self, offset, length) }
+    }
+
+    #[cfg(feature = "async")]
     unsafe fn dyn_pure_write_allocated_zeroes(
         &self,
         offset: u64,
@@ -554,6 +643,12 @@ impl<S: Storage + 'static> DynStorage for S {
         Box::pin(unsafe { <S as Storage>::pure_write_allocated_zeroes(self, offset, length) })
     }
 
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_pure_write_allocated_zeroes(&self, offset: u64, length: u64) -> io::Result<()> {
+        unsafe { <S as Storage>::pure_write_allocated_zeroes(self, offset, length) }
+    }
+
+    #[cfg(feature = "async")]
     unsafe fn dyn_pure_discard(
         &self,
         offset: u64,
@@ -562,22 +657,46 @@ impl<S: Storage + 'static> DynStorage for S {
         Box::pin(unsafe { <S as Storage>::pure_discard(self, offset, length) })
     }
 
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_pure_discard(&self, offset: u64, length: u64) -> io::Result<()> {
+        unsafe { <S as Storage>::pure_discard(self, offset, length) }
+    }
+
+    #[cfg(feature = "async")]
     fn dyn_flush(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + '_>> {
         Box::pin(<S as Storage>::flush(self))
     }
 
+    #[cfg(feature = "sync")]
+    fn dyn_flush(&self) -> io::Result<()> {
+        <S as Storage>::flush(self)
+    }
+
+    #[cfg(feature = "async")]
     fn dyn_sync(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + '_>> {
         Box::pin(<S as Storage>::sync(self))
     }
 
+    #[cfg(feature = "sync")]
+    fn dyn_sync(&self) -> io::Result<()> {
+        <S as Storage>::sync(self)
+    }
+
+    #[cfg(feature = "async")]
     unsafe fn dyn_invalidate_cache(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + '_>> {
         Box::pin(unsafe { <S as Storage>::invalidate_cache(self) })
+    }
+
+    #[cfg(feature = "sync")]
+    unsafe fn dyn_invalidate_cache(&self) -> io::Result<()> {
+        unsafe { <S as Storage>::invalidate_cache(self) }
     }
 
     fn dyn_get_storage_helper(&self) -> &CommonStorageHelper {
         <S as Storage>::get_storage_helper(self)
     }
 
+    #[cfg(feature = "async")]
     fn dyn_resize(
         &self,
         new_size: u64,
@@ -585,8 +704,14 @@ impl<S: Storage + 'static> DynStorage for S {
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + '_>> {
         Box::pin(<S as Storage>::resize(self, new_size, prealloc_mode))
     }
+
+    #[cfg(feature = "sync")]
+    fn dyn_resize(&self, new_size: u64, prealloc_mode: PreallocateMode) -> io::Result<()> {
+        <S as Storage>::resize(self, new_size, prealloc_mode)
+    }
 }
 
+#[maybe_async(AFIT)]
 impl Storage for Box<dyn DynStorage> {
     async fn open(opts: StorageOpenOptions) -> io::Result<Self> {
         // TODO: When we have more drivers, choose different defaults depending on the options
@@ -673,6 +798,7 @@ impl Storage for Box<dyn DynStorage> {
     }
 }
 
+#[maybe_async(AFIT)]
 impl Storage for Arc<dyn DynStorage> {
     async fn open(opts: StorageOpenOptions) -> io::Result<Self> {
         Box::<dyn DynStorage>::open(opts).await.map(Into::into)
@@ -901,6 +1027,7 @@ impl Default for StorageCreateOptions {
 ///
 /// To be used as the default implementation of [`Storage::pure_write_zeroes()`] and
 /// [`Storage::pure_write_allocated_zeroes()`].
+#[maybe_async]
 async unsafe fn pure_write_full_zeroes<S: Storage>(
     storage: S,
     mut offset: u64,

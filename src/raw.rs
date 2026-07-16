@@ -11,7 +11,7 @@ use crate::format::{Format, PreallocateMode};
 use crate::{
     storage, DenyImplicitOpenGate, ShallowMapping, Storage, StorageExt, StorageOpenOptions,
 };
-use async_trait::async_trait;
+use maybe_async::maybe_async;
 use std::fmt::{self, Display, Formatter};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,7 @@ pub struct Raw<S: Storage + 'static> {
     size: AtomicU64,
 }
 
+#[maybe_async]
 impl<S: Storage + 'static> Raw<S> {
     /// Create a new [`FormatDriverBuilder`] instance for the given image.
     pub fn builder(image: S) -> RawOpenBuilder<S> {
@@ -83,7 +84,7 @@ impl<S: Storage + 'static> Raw<S> {
     }
 }
 
-#[async_trait(?Send)]
+#[maybe_async(?Send)]
 impl<S: Storage + 'static> FormatDriverInstance for Raw<S> {
     type Storage = S;
 
@@ -114,6 +115,7 @@ impl<S: Storage + 'static> FormatDriverInstance for Raw<S> {
         self.writable
     }
 
+    #[allow(clippy::needless_lifetimes)] // Elidable in sync, but async needs a named lifetime for the boxed future bound
     async fn get_mapping<'a>(
         &'a self,
         offset: u64,
@@ -134,6 +136,7 @@ impl<S: Storage + 'static> FormatDriverInstance for Raw<S> {
         ))
     }
 
+    #[allow(clippy::needless_lifetimes)] // Elidable in sync, but async needs a named lifetime for the boxed future bound
     async fn ensure_data_mapping<'a>(
         &'a self,
         offset: u64,
@@ -274,6 +277,7 @@ impl<S: Storage + 'static> Display for Raw<S> {
 /// Options builder for opening a raw image.
 pub struct RawOpenBuilder<S: Storage + 'static>(FormatDriverBuilderBase<S>);
 
+#[maybe_async(AFIT)]
 impl<S: Storage + 'static> FormatDriverBuilder<S> for RawOpenBuilder<S> {
     type Format = Raw<S>;
     const FORMAT: Format = Format::Raw;
@@ -318,6 +322,7 @@ impl<S: Storage + 'static> FormatDriverBuilder<S> for RawOpenBuilder<S> {
 /// Creation builder for a new raw image.
 pub struct RawCreateBuilder<S: Storage + 'static>(FormatCreateBuilderBase<S>);
 
+#[maybe_async(AFIT)]
 impl<S: Storage + 'static> FormatCreateBuilder<S> for RawCreateBuilder<S> {
     const FORMAT: Format = Format::Raw;
     type DriverBuilder = RawOpenBuilder<S>;

@@ -9,14 +9,16 @@
 
 #![allow(dead_code)]
 
-use crate::vector_select::FutureVector;
+use crate::sync_primitives::{RwLock, RwLockWriteGuard};
+#[cfg(feature = "async")]
+use futures::stream::{FuturesUnordered, StreamExt};
+use maybe_async::maybe_async;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::{io, mem};
-use tokio::sync::{RwLock, RwLockWriteGuard};
 use tracing::{error, instrument, trace};
 
 /// Cache entry structure, wrapping the cached object.
@@ -62,6 +64,7 @@ pub(crate) struct AsyncLruCache<
 >(Arc<AsyncLruCacheInner<K, V, B>>);
 
 /// Provides loading and flushing for cache entries.
+#[maybe_async(AFIT)]
 pub(crate) trait AsyncLruCacheBackend: Send + Sync {
     /// Key type.
     type Key: Clone + Copy + Debug + PartialEq + Eq + Hash + Send + Sync;
@@ -91,6 +94,7 @@ pub(crate) trait AsyncLruCacheBackend: Send + Sync {
     unsafe fn evict(&self, key: Self::Key, value: Self::Value);
 }
 
+#[maybe_async]
 impl<
         K: Clone + Copy + Debug + PartialEq + Eq + Hash + Send + Sync,
         V: Send + Sync,
@@ -155,6 +159,7 @@ impl<
     }
 }
 
+#[maybe_async]
 impl<
         K: Clone + Copy + Debug + PartialEq + Eq + Hash + Send + Sync,
         V: Send + Sync,
@@ -341,21 +346,30 @@ impl<
         fields(self = &self as *const _ as usize)
     )]
     async fn flush(&self) -> io::Result<()> {
-        let mut futs = FutureVector::new();
+        #[cfg(feature = "async")]
+        let mut futs = FuturesUnordered::new();
 
         let map = self.map.read().await;
+        let mut first_err: Option<io::Error> = None;
         for (key, entry) in map.iter() {
             let key = *key;
-            let object = Arc::clone(entry.value());
             trace!("Flushing {key:?}");
-            futs.push(Box::pin(
-                async move { self.backend.flush(key, &object).await },
-            ));
+            #[cfg(feature = "async")]
+            futs.push({
+                let object = Arc::clone(entry.value());
+                async move { self.backend.flush(key, &object).await }
+            });
+            #[cfg(feature = "sync")]
+            if let Err(e) = self.backend.flush(key, entry.value()) {
+                first_err.get_or_insert(e);
+            }
         }
 
-        let mut first_err = None;
-        while let Err(e) = futs.discarding_join().await {
-            first_err.get_or_insert(e);
+        #[cfg(feature = "async")]
+        while let Some(result) = futs.next().await {
+            if let Err(e) = result {
+                first_err.get_or_insert(e);
+            }
         }
         if let Some(e) = first_err {
             Err(e)
@@ -432,6 +446,7 @@ mod tests {
     /// Minimal backend for testing: load returns the key, flush is a no-op
     struct DummyBackend;
 
+    #[maybe_async(AFIT)]
     impl AsyncLruCacheBackend for DummyBackend {
         type Key = usize;
         type Value = usize;
@@ -453,6 +468,7 @@ mod tests {
         flushed: std::sync::Mutex<Vec<(usize, usize)>>,
     }
 
+    #[maybe_async(AFIT)]
     impl AsyncLruCacheBackend for RecordingBackend {
         type Key = usize;
         type Value = usize;
@@ -469,6 +485,7 @@ mod tests {
         unsafe fn evict(&self, _key: usize, _value: usize) {}
     }
 
+    #[maybe_async(AFIT)]
     impl<B: AsyncLruCacheBackend> AsyncLruCacheBackend for Arc<B> {
         type Key = <B as AsyncLruCacheBackend>::Key;
         type Value = <B as AsyncLruCacheBackend>::Value;
@@ -488,13 +505,14 @@ mod tests {
 
     /// `flush()` must continue past individual entry errors and report the first one, not stop at
     /// the first failure
-    #[tokio::test]
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
     async fn test_flush_continues_past_errors() {
         #[derive(Default)]
         struct FailOddBackend {
             flush_count: AtomicUsize,
         }
 
+        #[maybe_async(AFIT)]
         impl AsyncLruCacheBackend for FailOddBackend {
             type Key = usize;
             type Value = usize;
@@ -531,7 +549,7 @@ mod tests {
     }
 
     /// Eviction must remove the least-recently-used entry
-    #[tokio::test]
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
     async fn test_lru_eviction_order() {
         const ENTRIES: usize = 3;
 
@@ -546,14 +564,15 @@ mod tests {
         cache.get_or_insert(0, false).await.unwrap().unwrap();
 
         // Insert one more key — must evict key 1 (the oldest untouched)
-        assert_eq!(cache.get_or_insert(ENTRIES, false).await.unwrap(), None);
+        let entry = cache.get_or_insert(ENTRIES, false).await.unwrap();
+        assert_eq!(entry, None);
         cache.get_or_insert(ENTRIES, true).await.unwrap().unwrap();
 
         assert_eq!(*backend.flushed.lock().unwrap(), [(1, 1)]);
     }
 
     /// Entries with external `Arc` references must not be evicted
-    #[tokio::test]
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
     async fn test_in_use_entries_not_evicted() {
         let backend = Arc::new(RecordingBackend::default());
         let cache = AsyncLruCache::new(Arc::clone(&backend), 2);
@@ -562,7 +581,8 @@ mod tests {
         cache.get_or_insert(1, false).await.unwrap().unwrap();
 
         // Insert key 2 — key 0 is oldest but in use, so key 1 must be evicted
-        assert_eq!(cache.get_or_insert(2, false).await.unwrap(), None);
+        let entry = cache.get_or_insert(2, false).await.unwrap();
+        assert_eq!(entry, None);
         cache.get_or_insert(2, true).await.unwrap().unwrap();
 
         assert_eq!(*backend.flushed.lock().unwrap(), [(1, 1)]);
@@ -570,7 +590,7 @@ mod tests {
     }
 
     /// When all entries are in use, eviction must fail with an error
-    #[tokio::test]
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
     async fn test_cache_full_all_in_use() {
         const ENTRIES: usize = 23;
 
@@ -581,13 +601,14 @@ mod tests {
             held.push(cache.get_or_insert(i, false).await.unwrap().unwrap());
         }
 
-        assert_eq!(cache.get_or_insert(ENTRIES, false).await.unwrap(), None);
+        let entry = cache.get_or_insert(ENTRIES, false).await.unwrap();
+        assert_eq!(entry, None);
         let err = cache.get_or_insert(ENTRIES, true).await.unwrap_err();
         assert!(err.to_string().contains("everything is in use"));
     }
 
     /// `invalidate()` must retain entries that are still in use and evict the rest
-    #[tokio::test]
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
     async fn test_invalidate_retains_in_use() {
         let cache = AsyncLruCache::new(DummyBackend, 16);
 
@@ -603,14 +624,16 @@ mod tests {
         let from_cache = cache.get_or_insert(0, true).await.unwrap().unwrap();
         assert!(Arc::ptr_eq(&from_cache, &held));
 
-        assert_eq!(cache.0.map.read().await.len(), 1);
+        let len = cache.0.map.read().await.len();
+        assert_eq!(len, 1);
     }
 
     /// When eviction flush fails, the entry must be re-inserted and remain accessible
-    #[tokio::test]
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
     async fn test_eviction_flush_failure_reinserts_entry() {
         struct FailFlushBackend;
 
+        #[maybe_async(AFIT)]
         impl AsyncLruCacheBackend for FailFlushBackend {
             type Key = usize;
             type Value = usize;
@@ -635,37 +658,45 @@ mod tests {
         }
 
         // Cache is full
-        assert_eq!(cache.get_or_insert(ENTRIES, false).await.unwrap(), None);
+        let entry = cache.get_or_insert(ENTRIES, false).await.unwrap();
+        assert_eq!(entry, None);
         // And eviction flush fails
         let err = cache.get_or_insert(ENTRIES, true).await.unwrap_err();
         assert!(err.to_string().contains("flush failed"));
 
         // All original entries must still be in the cache
-        assert_eq!(cache.0.map.read().await.len(), ENTRIES);
+        let len = cache.0.map.read().await.len();
+        assert_eq!(len, ENTRIES);
         for i in 0..ENTRIES {
             let entry = cache.get_or_insert(i, false).await.unwrap().unwrap();
             assert_eq!(*entry, i);
         }
 
         // New entry was never inserted
-        assert_eq!(cache.get_or_insert(ENTRIES, false).await.unwrap(), None);
+        let entry = cache.get_or_insert(ENTRIES, false).await.unwrap();
+        assert_eq!(entry, None);
         let err = cache.get_or_insert(ENTRIES, true).await.unwrap_err();
         assert!(err.to_string().contains("flush failed"));
     }
 
     /// `insert()` over an existing key must flush the old value first
-    #[tokio::test]
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
     async fn test_insert_flushes_existing() {
         let backend = Arc::new(RecordingBackend::default());
         let cache = AsyncLruCache::new(Arc::clone(&backend), 16);
 
         cache.get_or_insert(5, false).await.unwrap().unwrap();
-        assert!(!cache.insert(5, Arc::new(55), false).await.unwrap());
-        assert!(cache.insert(5, Arc::new(55), true).await.unwrap());
+        let inserted = cache.insert(5, Arc::new(55), false).await.unwrap();
+        assert!(!inserted);
+        let inserted = cache.insert(5, Arc::new(55), true).await.unwrap();
+        assert!(inserted);
 
         assert_eq!(*backend.flushed.lock().unwrap(), [(5, 5)]);
-        assert_eq!(*cache.get_or_insert(5, false).await.unwrap().unwrap(), 55);
-        assert_eq!(*cache.get_or_insert(5, true).await.unwrap().unwrap(), 55);
-        assert_eq!(cache.0.map.read().await.len(), 1);
+        let entry = *cache.get_or_insert(5, false).await.unwrap().unwrap();
+        assert_eq!(entry, 55);
+        let entry = *cache.get_or_insert(5, true).await.unwrap().unwrap();
+        assert_eq!(entry, 55);
+        let len = cache.0.map.read().await.len();
+        assert_eq!(len, 1);
     }
 }

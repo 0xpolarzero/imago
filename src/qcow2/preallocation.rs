@@ -5,6 +5,7 @@
 use super::*;
 use crate::storage::ext::write_full_zeroes;
 
+#[maybe_async]
 impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
     /// Make the given range zero.
     ///

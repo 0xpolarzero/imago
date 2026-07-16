@@ -6,8 +6,10 @@ use super::drivers::{FormatDriverInstance, ShallowMapping};
 use super::PreallocateMode;
 use crate::io_buffers::{IoVector, IoVectorMut};
 use crate::storage::ext::write_full_zeroes;
-use crate::vector_select::FutureVector;
 use crate::{Storage, StorageExt};
+#[cfg(feature = "async")]
+use futures::stream::{FuturesUnordered, StreamExt};
+use maybe_async::maybe_async;
 use std::fmt::{self, Display, Formatter};
 use std::{cmp, io, ptr};
 
@@ -21,9 +23,11 @@ pub struct FormatAccess<S: Storage + 'static> {
     writable: bool,
 
     /// How many asynchronous requests to perform per read request in parallel.
+    #[cfg(feature = "async")]
     read_parallelization: usize,
 
     /// How many asynchronous requests to perform per write request in parallel.
+    #[cfg(feature = "async")]
     write_parallelization: usize,
 }
 
@@ -101,6 +105,7 @@ pub enum Mapping<'a, S: Storage + 'static> {
 }
 
 // When adding new public methods, don’t forget to add them to sync_wrappers, too.
+#[maybe_async]
 impl<S: Storage + 'static> FormatAccess<S> {
     /// Wrap a format driver instance in `FormatAccess`.
     ///
@@ -110,7 +115,9 @@ impl<S: Storage + 'static> FormatAccess<S> {
         let writable = inner.writable();
         FormatAccess {
             inner: Box::new(inner),
+            #[cfg(feature = "async")]
             read_parallelization: 1,
+            #[cfg(feature = "async")]
             write_parallelization: 1,
             writable,
         }
@@ -135,6 +142,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
     ///
     /// When issuing read requests, issue this many async requests in parallel (still in a single
     /// thread).  The default count is `1`, i.e. no parallel requests.
+    #[cfg(feature = "async")]
     pub fn set_async_read_parallelization(&mut self, count: usize) {
         self.read_parallelization = count;
     }
@@ -143,6 +151,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
     ///
     /// When issuing write requests, issue this many async requests in parallel (still in a single
     /// thread).  The default count is `1`, i.e. no parallel requests.
+    #[cfg(feature = "async")]
     pub fn set_async_write_parallelization(&mut self, count: usize) {
         self.write_parallelization = count;
     }
@@ -335,7 +344,8 @@ impl<S: Storage + 'static> FormatAccess<S> {
     /// Reads until `bufv` is filled completely, i.e. will not do short reads.  When reaching the
     /// end of file, the rest of `bufv` is filled with 0.
     pub async fn readv(&self, mut bufv: IoVectorMut<'_>, mut offset: u64) -> io::Result<()> {
-        let mut workers = (self.read_parallelization > 1).then(FutureVector::new);
+        #[cfg(feature = "async")]
+        let mut workers = (self.read_parallelization > 1).then(FuturesUnordered::new);
 
         while !bufv.is_empty() {
             let (mapping, chunk_length) = self.get_mapping(offset, bufv.len()).await?;
@@ -345,9 +355,10 @@ impl<S: Storage + 'static> FormatAccess<S> {
                 break;
             }
 
+            #[cfg(feature = "async")]
             if let Some(workers) = workers.as_mut() {
                 while workers.len() >= self.read_parallelization {
-                    workers.select().await?;
+                    workers.next().await.unwrap()?;
                 }
             }
 
@@ -355,15 +366,19 @@ impl<S: Storage + 'static> FormatAccess<S> {
             bufv = remainder;
             offset += chunk_length;
 
+            #[cfg(feature = "async")]
             if let Some(workers) = workers.as_mut() {
-                workers.push(Box::pin(self.read_chunk(chunk, mapping)));
+                workers.push(self.read_chunk(chunk, mapping));
             } else {
                 self.read_chunk(chunk, mapping).await?;
             }
+            #[cfg(feature = "sync")]
+            self.read_chunk(chunk, mapping)?;
         }
 
+        #[cfg(feature = "async")]
         if let Some(mut workers) = workers {
-            workers.discarding_join().await?;
+            while workers.next().await.transpose()?.is_some() {}
         }
 
         Ok(())
@@ -373,7 +388,11 @@ impl<S: Storage + 'static> FormatAccess<S> {
     ///
     /// Reads until `buf` is filled completely, i.e. will not do short reads.  When reaching the
     /// end of file, the rest of `buf` is filled with 0.
-    pub async fn read(&self, buf: impl Into<IoVectorMut<'_>>, offset: u64) -> io::Result<()> {
+    pub async fn read<'a>(
+        &'a self,
+        buf: impl Into<IoVectorMut<'a>>,
+        offset: u64,
+    ) -> io::Result<()> {
         self.readv(buf.into(), offset).await
     }
 
@@ -395,15 +414,17 @@ impl<S: Storage + 'static> FormatAccess<S> {
             bufv = bufv.split_at(disk_size - offset).0;
         }
 
-        let mut workers = (self.write_parallelization > 1).then(FutureVector::new);
+        #[cfg(feature = "async")]
+        let mut workers = (self.write_parallelization > 1).then(FuturesUnordered::new);
 
         while !bufv.is_empty() {
             let (storage, st_offset, st_length) =
                 self.ensure_data_mapping(offset, bufv.len(), true).await?;
 
+            #[cfg(feature = "async")]
             if let Some(workers) = workers.as_mut() {
                 while workers.len() >= self.write_parallelization {
-                    workers.select().await?;
+                    workers.next().await.unwrap()?;
                 }
             }
 
@@ -411,15 +432,19 @@ impl<S: Storage + 'static> FormatAccess<S> {
             bufv = remainder;
             offset += st_length;
 
+            #[cfg(feature = "async")]
             if let Some(workers) = workers.as_mut() {
-                workers.push(Box::pin(storage.writev(chunk, st_offset)));
+                workers.push(storage.writev(chunk, st_offset));
             } else {
                 storage.writev(chunk, st_offset).await?;
             }
+            #[cfg(feature = "sync")]
+            storage.writev(chunk, st_offset)?;
         }
 
+        #[cfg(feature = "async")]
         if let Some(mut workers) = workers {
-            workers.discarding_join().await?;
+            while workers.next().await.transpose()?.is_some() {}
         }
 
         Ok(())
@@ -429,7 +454,7 @@ impl<S: Storage + 'static> FormatAccess<S> {
     ///
     /// Writes all data from `bufv` (or returns an error), i.e. will not do short writes.  Reaching
     /// the end of file before the end of the buffer results in an error.
-    pub async fn write(&self, buf: impl Into<IoVector<'_>>, offset: u64) -> io::Result<()> {
+    pub async fn write<'a>(&'a self, buf: impl Into<IoVector<'a>>, offset: u64) -> io::Result<()> {
         self.writev(buf.into(), offset).await
     }
 
@@ -773,13 +798,14 @@ impl<S: Storage + 'static> FormatAccess<S> {
         Ok(())
     }
 
-    /// Flush internal buffers.  Always call this before drop!
+    /// Flush internal buffers.  Always call this before drop! (except in sync mode)
     ///
     /// Does not necessarily sync those buffers to disk.  When using `flush()`, consider whether
     /// you want to call `sync()` afterwards.
     ///
-    /// Because of the current lack of stable `async_drop`, you must manually call this before
-    /// dropping a `FormatAccess` instance!  (Not necessarily for read-only images, though.)
+    /// In async mode, because of the current lack of stable `async_drop`, you must manually call
+    /// this before dropping a `FormatAccess` instance!  (Not necessarily for read-only images,
+    /// though.)  In sync mode, `Drop` calls this automatically.
     ///
     /// Note that this will not drop the buffers, so they may still be used to serve later
     /// accesses.  Use [`FormatAccess::invalidate_cache()`] to drop all buffers.
@@ -899,6 +925,16 @@ impl<S: Storage> Display for Mapping<'_, S> {
             Mapping::Special { layer, offset } => {
                 write!(f, "<special:{layer}:0x{offset:x}>")
             }
+        }
+    }
+}
+
+#[cfg(feature = "sync")]
+impl<S: Storage> Drop for FormatAccess<S> {
+    fn drop(&mut self) {
+        if let Err(err) = self.flush() {
+            let inner = &self.inner;
+            tracing::error!("Failed to flush {inner}: {err}");
         }
     }
 }

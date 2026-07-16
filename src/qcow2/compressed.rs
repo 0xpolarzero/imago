@@ -5,6 +5,7 @@ use crate::io_buffers::IoBuffer;
 use miniz_oxide::inflate::core::{decompress as inflate, DecompressorOxide};
 use miniz_oxide::inflate::TINFLStatus;
 
+#[maybe_async]
 impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> Qcow2<S, F> {
     /// Read one compressed cluster.
     ///

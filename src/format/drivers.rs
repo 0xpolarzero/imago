@@ -6,13 +6,13 @@
 use super::{Format, PreallocateMode};
 use crate::io_buffers::IoVectorMut;
 use crate::{FormatAccess, Storage};
-use async_trait::async_trait;
+use maybe_async::maybe_async;
 use std::any::Any;
 use std::fmt::{Debug, Display};
 use std::io;
 
 /// Implementation of a disk image format.
-#[async_trait(?Send)]
+#[maybe_async(?Send)]
 pub trait FormatDriverInstance: Any + Debug + Display + Send + Sync {
     /// Type of storage used.
     type Storage: Storage;
@@ -90,6 +90,7 @@ pub trait FormatDriverInstance: Any + Debug + Display + Send + Sync {
     /// exceed that value if that simplifies the implementation.
     ///
     /// The returned length must only be 0 if `ShallowMapping::Eof` is returned.
+    #[allow(clippy::needless_lifetimes)] // Elidable in sync, but async needs a named lifetime for the boxed future bound
     async fn get_mapping<'a>(
         &'a self,
         offset: u64,
@@ -113,6 +114,7 @@ pub trait FormatDriverInstance: Any + Debug + Display + Send + Sync {
     /// mappings.  Making them unused, but retaining them as allocated so they can safely be
     /// written to (albeit with no effect) is OK; discarding them so that they may be reused for
     /// other mappings is not.
+    #[allow(clippy::needless_lifetimes)] // Elidable in sync, but async needs a named lifetime for the boxed future bound
     async fn ensure_data_mapping<'a>(
         &'a self,
         offset: u64,

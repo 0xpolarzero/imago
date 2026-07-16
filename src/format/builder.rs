@@ -9,6 +9,7 @@ use crate::qcow2::Qcow2OpenBuilder;
 use crate::raw::RawOpenBuilder;
 use crate::vmdk::VmdkOpenBuilder;
 use crate::{Storage, StorageOpenOptions};
+use maybe_async::maybe_async;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 /// generally not require invoking those methods (i.e. sane defaults should apply).
 ///
 /// See [`Qcow2OpenBuilder`] for an example implementation.
+#[maybe_async(AFIT)]
 pub trait FormatDriverBuilder<S: Storage + 'static>: Sized {
     /// The format object that this builder will create.
     type Format: FormatDriverInstance<Storage = S>;
@@ -61,6 +63,7 @@ pub trait FormatDriverBuilder<S: Storage + 'static>: Sized {
     ///
     /// For example:
     /// ```no_run
+    /// # #[cfg(feature = "async")]
     /// # let _ = async {
     /// use imago::file::File;
     /// use imago::qcow2::Qcow2;
@@ -107,6 +110,7 @@ pub trait FormatDriverBuilder<S: Storage + 'static>: Sized {
 /// implementation will provide such specialized methods.
 ///
 /// See [`Qcow2CreateBuilder`](crate::qcow2::Qcow2CreateBuilder) for an example implementation.
+#[maybe_async(AFIT)]
 pub trait FormatCreateBuilder<S: Storage + 'static>: Sized {
     /// Which format this is.
     const FORMAT: Format;
@@ -176,6 +180,7 @@ pub struct FormatCreateBuilderBase<S: Storage> {
     prealloc_mode: PreallocateMode,
 }
 
+#[maybe_async]
 impl<S: Storage + 'static> FormatDriverBuilderBase<S> {
     /// Create a new instance of this type.
     fn do_new(image: StorageOrPath<S>) -> Self {
@@ -296,6 +301,7 @@ pub(crate) enum StorageOrPath<S: Storage> {
     Path(PathBuf),
 }
 
+#[maybe_async]
 impl<S: Storage + 'static> StorageOrPath<S> {
     /// Open the storage object.
     pub async fn open_storage<G: ImplicitOpenGate<S>>(
@@ -330,6 +336,7 @@ pub(crate) enum FormatOrBuilder<S: Storage + 'static, F: WrappedFormat<S>> {
     VmdkBuilder(Box<VmdkOpenBuilder<S>>),
 }
 
+#[maybe_async]
 impl<S: Storage + 'static, F: WrappedFormat<S> + 'static> FormatOrBuilder<S, F> {
     /// Create a new builder variant.
     ///

@@ -8,13 +8,15 @@ repository = "https://gitlab.com/hreitz/imago"
 readme = "README.md"
 
 [dependencies]
-async-trait = "0.1"
+async-trait = { version = "0.1", optional = true }
 bincode = { version = "2", features = ["derive"], default-features = false }
 cfg-if = "1"
+futures = { version = "0.3", features = ["alloc"], default-features = false, optional = true }
+maybe-async = "0.2"
 miniz_oxide = { version = "0.8", features = ["std"] }
 nix = { version = "0.30", features = ["ioctl"] }
 page_size = "0.6"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync"], optional = true }
 tracing = { version = "0.1", features = ["attributes"] }
 vm-memory = { version = ">=0.16, <0.19", optional = true, default-features = false }
 
@@ -35,15 +37,17 @@ windows-sys = { version = "0.61", features = [
 
 # Document all features for docs.rs
 [package.metadata.docs.rs]
-all-features = true
+features = ["async", "sync-wrappers", "vm-memory"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [features]
-default = []
+default = ["async"]
 # async-drop = []
-sync-wrappers = ["tokio/rt"]
+async = ["dep:tokio", "dep:async-trait", "dep:futures"]
+sync = ["maybe-async/is_sync"]
+sync-wrappers = ["async", "tokio/rt"]
 vm-memory = ["dep:vm-memory"]
 
 [lints.rust]
@@ -55,6 +59,10 @@ unknown_lints = "allow"
 
 # Prohibit code that is forbidden in Rust 2024
 unsafe_op_in_unsafe_fn = "deny"
+
+# The `sync` feature is built up across commits; allow cfg references before
+# it is defined in [features].
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("sync"))'] }
 
 warnings = "deny"
 

@@ -4,15 +4,16 @@ use super::types::*;
 use crate::io_buffers::IoBuffer;
 use crate::macros::numerical_enum;
 use crate::misc_helpers::invalid_data;
+use crate::sync_primitives::{Mutex, MutexGuard};
 use crate::{Storage, StorageExt};
 use bincode::config::{BigEndian, Configuration as BincodeConfiguration, Fixint};
 use bincode::{Decode, Encode};
+use maybe_async::maybe_async;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::num::TryFromIntError;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::{cmp, io};
-use tokio::sync::{Mutex, MutexGuard};
 use tracing::error;
 
 /// Qcow header magic ("QFI\xfb").
@@ -336,6 +337,7 @@ pub(super) struct Header {
     external_data_file: bool,
 }
 
+#[maybe_async]
 impl Header {
     /// Load the qcow2 header from disk.
     ///
@@ -1741,6 +1743,7 @@ pub(super) struct L2TableWriteGuard<'a> {
     _lock: MutexGuard<'a, ()>,
 }
 
+#[maybe_async]
 impl L2Table {
     /// Create a new zeroed L2 table.
     pub fn new_cleared(header: &Header) -> Self {
@@ -2234,6 +2237,7 @@ pub(super) struct RefBlockWriteGuard<'a> {
     _lock: MutexGuard<'a, ()>,
 }
 
+#[maybe_async]
 impl RefBlock {
     /// Create a new zeroed refcount block.
     pub fn new_cleared<S: Storage>(for_image: &S, header: &Header) -> io::Result<Self> {
@@ -2698,6 +2702,7 @@ where
 }
 
 /// Generic trait for qcow2 metadata tables (L1, L2, refcount table).
+#[maybe_async(AFIT)]
 pub trait Table: Sized {
     /// Internal type for each table entry.
     type InternalEntry: TableEntry;

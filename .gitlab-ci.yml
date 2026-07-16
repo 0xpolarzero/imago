@@ -64,11 +64,10 @@ check:clippy:
   parallel:
     matrix:
       - TARGET: [ "x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-gnu" ]
+        CARGO_OPTS: [ "--features=async,sync-wrappers,vm-memory", "--no-default-features --features=sync,vm-memory" ]
   script:
     - 'if test "$TARGET" = x86_64-pc-windows-gnu; then
-        CARGO_OPTS="-F sync-wrappers";
-      else
-        CARGO_OPTS=--all-features;
+        CARGO_OPTS=$(echo "$CARGO_OPTS" | sed -e "s/,vm-memory//");
       fi'
     - 'cargo +stable clippy
       --target $TARGET
@@ -83,12 +82,11 @@ check:clippy-nightly:
   parallel:
     matrix:
       - TARGET: [ "x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-gnu" ]
+        CARGO_OPTS: [ "--features=async,sync-wrappers,vm-memory", "--no-default-features --features=sync,vm-memory" ]
   allow_failure: true
   script:
     - 'if test "$TARGET" = x86_64-pc-windows-gnu; then
-        CARGO_OPTS="-F sync-wrappers";
-      else
-        CARGO_OPTS=--all-features;
+        CARGO_OPTS=$(echo "$CARGO_OPTS" | sed -e "s/,vm-memory//");
       fi'
     - 'RUSTFLAGS=-Dunknown_lints cargo +nightly clippy
       --target $TARGET
@@ -109,13 +107,10 @@ build:
   stage: build
   needs:
     - job: "check:clippy"
-      parallel:
-        matrix:
-          - TARGET: x86_64-unknown-linux-gnu
   timeout: 1h
   parallel:
     matrix:
-    - CARGO_OPTS: [ "", "--all-features" ]
+    - CARGO_OPTS: [ "", "--features=async,sync-wrappers,vm-memory", "--no-default-features --features=sync,vm-memory" ]
   script:
     - cargo +stable build --verbose --color always $CARGO_OPTS
 
@@ -124,42 +119,62 @@ build:docs:
   stage: build
   needs:
     - job: "check:clippy"
-      parallel:
-        matrix:
-          - TARGET: x86_64-unknown-linux-gnu
   script:
-    - cargo +stable doc --color=always --verbose --no-deps --all-features --document-private-items
+    - cargo +stable doc --color=always --verbose --no-deps --features=async,sync-wrappers,vm-memory --document-private-items
   artifacts:
     paths:
       - target/doc
 
+build:sync_docs:
+  extends: .rust_template
+  stage: build
+  needs:
+    - job: "check:clippy"
+  script:
+    - 'cargo +stable doc
+      --color=always
+      --verbose
+      --no-deps
+      --no-default-features
+      --features=sync,vm-memory
+      --document-private-items
+      --target-dir=target/sync'
+  artifacts:
+    paths:
+      - target/sync/doc
+
 test:test:
   extends: .rust_template
   stage: test
+  parallel:
+    matrix:
+      - CARGO_OPTS: [ "", "--features=async,sync-wrappers,vm-memory", "--no-default-features --features=sync,vm-memory" ]
   needs:
     - job: build
-      parallel:
-        matrix:
-          - CARGO_OPTS: "--all-features"
   script:
     - 'cargo +stable test
       --verbose
       --color always
       --workspace
       --all-targets
-      --all-features
-      --no-fail-fast'
+      --no-fail-fast
+      $CARGO_OPTS'
 
 publish:docs:
   stage: publish
   image: alpine
   dependencies:
     - build:docs
+    - build:sync_docs
   script:
     - mkdir -p public
     - mv target/doc public/doc
+    - mv target/sync/doc public/sync-doc
     - echo '/imago /imago/doc/imago/index.html 302' > public/_redirects
+    - echo '/imago-sync /imago/sync-doc/imago/index.html 302' >> public/_redirects
+    - echo '/imago/sync /imago/sync-doc/imago/index.html 302' >> public/_redirects
     - echo '/ /doc/imago/index.html 302' >> public/_redirects
+    - echo '/sync /sync-doc/imago/index.html 302' >> public/_redirects
   artifacts:
     paths:
       - public
