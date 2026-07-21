@@ -86,11 +86,9 @@ macro_rules! passthrough_trait_fn {
 pub(crate) use passthrough_trait_fn;
 
 /// Evaluate to the last element in the list, separated by commas.
-#[allow(unused_macros)] // TODO: Use and remove
 macro_rules! last_element {
     ($x:expr) => ($x);
     ($x:expr, $($tail:expr),+) => ($crate::macros::last_element!($($tail),+));
 }
 
-#[allow(unused_imports)] // TODO: Use and remove
 pub(crate) use last_element;

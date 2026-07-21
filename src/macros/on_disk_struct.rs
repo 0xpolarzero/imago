@@ -1,7 +1,5 @@
 //! Macro to allow binary structures be read/stored from/to disk.
 
-#![allow(dead_code, unused_imports, unused_macros)] // TODO: Use and remove
-
 use std::io;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
