@@ -1,5 +1,7 @@
 //! Helper macros.
 
+pub(crate) mod on_disk_struct;
+
 /// Implements `TryFrom` for enums from their numerical representation.
 macro_rules! numerical_enum {
     (
@@ -82,3 +84,11 @@ macro_rules! passthrough_trait_fn {
 }
 
 pub(crate) use passthrough_trait_fn;
+
+/// Evaluate to the last element in the list, separated by commas.
+macro_rules! last_element {
+    ($x:expr) => ($x);
+    ($x:expr, $($tail:expr),+) => ($crate::macros::last_element!($($tail),+));
+}
+
+pub(crate) use last_element;
