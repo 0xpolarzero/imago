@@ -13,6 +13,7 @@ use std::io;
 
 /// Implementation of a disk image format.
 #[maybe_async(?Send)]
+#[allow(clippy::double_must_use)] // strange interaction between `maybe_async(?Send)` and `async`
 pub trait FormatDriverInstance: Any + Debug + Display + Send + Sync {
     /// Type of storage used.
     type Storage: Storage;
