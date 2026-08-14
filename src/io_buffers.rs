@@ -918,6 +918,32 @@ impl_io_vector!(
 
 #[cfg(feature = "vm-memory")]
 impl<'a> IoVector<'a> {
+    /// Converts one `VolatileSlice` (from vm-memory) into an `IoVector`.
+    ///
+    /// The returned guard must not be dropped while this vector is in use.
+    pub fn from_volatile_slice_one<B: vm_memory::bitmap::BitmapSlice>(
+        slice: &'a vm_memory::VolatileSlice<'a, B>,
+    ) -> (
+        Self,
+        VolatileSliceGuardOne<'a, vm_memory::volatile_memory::PtrGuard, B>,
+    ) {
+        let ptr_guard = slice.ptr_guard();
+        let buffer = if ptr_guard.len() == 0 {
+            &[]
+        } else {
+            // Safety: this mirrors `VolatileSlice`'s guarded guest-memory lifetime model: the
+            // pointer guard remains alive until the returned guard is dropped.
+            unsafe { std::slice::from_raw_parts(ptr_guard.as_ptr(), ptr_guard.len()) }
+        };
+        let vector = IoVector::from(vec![IoSlice::new(buffer)]);
+        let guard = VolatileSliceGuardOne {
+            _ptr_guard: ptr_guard,
+            dirty_on_drop: None,
+        };
+
+        (vector, guard)
+    }
+
     /// Converts a `VolatileSlice` array (from vm-memory) into an `IoVector`.
     ///
     /// In addition to a the vector, return a guard that ensures that the memory in `slices` is
@@ -992,6 +1018,32 @@ impl IoVectorMut<'_> {
 
 #[cfg(feature = "vm-memory")]
 impl<'a> IoVectorMut<'a> {
+    /// Converts one `VolatileSlice` (from vm-memory) into an `IoVectorMut`.
+    ///
+    /// The returned guard must not be dropped while this vector is in use.
+    pub fn from_volatile_slice_one<B: vm_memory::bitmap::BitmapSlice>(
+        slice: &'a vm_memory::VolatileSlice<'a, B>,
+    ) -> (
+        Self,
+        VolatileSliceGuardOne<'a, vm_memory::volatile_memory::PtrGuardMut, B>,
+    ) {
+        let ptr_guard = slice.ptr_guard_mut();
+        let buffer = if ptr_guard.len() == 0 {
+            &mut []
+        } else {
+            // Safety: this mirrors `VolatileSlice`'s guarded guest-memory lifetime model: the
+            // pointer guard remains alive until the returned guard is dropped.
+            unsafe { std::slice::from_raw_parts_mut(ptr_guard.as_ptr(), ptr_guard.len()) }
+        };
+        let vector = IoVectorMut::from(vec![IoSliceMut::new(buffer)]);
+        let guard = VolatileSliceGuardOne {
+            _ptr_guard: ptr_guard,
+            dirty_on_drop: Some((slice.bitmap(), slice.len())),
+        };
+
+        (vector, guard)
+    }
+
     /// Converts a `VolatileSlice` array (from vm-memory) into an `IoVectorMut`.
     ///
     /// In addition to a the vector, return a guard that ensures that the memory in `slices` is
@@ -1087,6 +1139,16 @@ pub struct VolatileSliceGuard<'a, PtrGuardType, BitmapType: vm_memory::bitmap::B
     dirty_on_drop: Option<Vec<(&'a BitmapType, usize)>>,
 }
 
+/// Ensures an I/O vector’s validity when created from one [`vm_memory::VolatileSlice`].
+#[cfg(feature = "vm-memory")]
+pub struct VolatileSliceGuardOne<'a, PtrGuardType, BitmapType: vm_memory::bitmap::Bitmap> {
+    /// vm-memory’s pointer guard ensuring the memory remains mapped while used.
+    _ptr_guard: PtrGuardType,
+
+    /// If given, mark the full `VolatileSlice` dirty when dropping this guard.
+    dirty_on_drop: Option<(&'a BitmapType, usize)>,
+}
+
 #[cfg(feature = "vm-memory")]
 impl<P, B: vm_memory::bitmap::Bitmap> Drop for VolatileSliceGuard<'_, P, B> {
     fn drop(&mut self) {
@@ -1096,6 +1158,15 @@ impl<P, B: vm_memory::bitmap::Bitmap> Drop for VolatileSliceGuard<'_, P, B> {
                 // so marking the whole thing is dirty is correct.
                 bitmap.mark_dirty(0, len);
             }
+        }
+    }
+}
+
+#[cfg(feature = "vm-memory")]
+impl<P, B: vm_memory::bitmap::Bitmap> Drop for VolatileSliceGuardOne<'_, P, B> {
+    fn drop(&mut self) {
+        if let Some((bitmap, len)) = self.dirty_on_drop.take() {
+            bitmap.mark_dirty(0, len);
         }
     }
 }
@@ -1134,5 +1205,26 @@ mod vm_memory_test {
     fn test_volatile_slice_ref() {
         let empty: Vec<&vm_memory::VolatileSlice<()>> = Vec::new();
         do_test_volatile_slice_ref(&empty);
+    }
+
+    #[test]
+    fn test_volatile_slice_one() {
+        let mut data = [0u8; 4];
+        {
+            let slice = VolatileSlice::from(data.as_mut_slice());
+
+            let (vector, guard) = IoVector::from_volatile_slice_one(&slice);
+            let mut copied = [1; 4];
+            vector.copy_into_slice(&mut copied);
+            assert_eq!(copied, [0; 4]);
+            drop(vector);
+            drop(guard);
+
+            let (mut vector, guard) = IoVectorMut::from_volatile_slice_one(&slice);
+            vector.fill(1);
+            drop(vector);
+            drop(guard);
+        }
+        assert_eq!(data, [1; 4]);
     }
 }
