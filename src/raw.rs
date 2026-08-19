@@ -230,6 +230,7 @@ impl<S: Storage + 'static> FormatDriverInstance for Raw<S> {
         new_size: u64,
         format_prealloc_mode: PreallocateMode,
     ) -> io::Result<()> {
+        #[allow(deprecated)]
         if self
             .size
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
@@ -252,6 +253,7 @@ impl<S: Storage + 'static> FormatDriverInstance for Raw<S> {
     }
 
     async fn resize_shrink(&mut self, new_size: u64) -> io::Result<()> {
+        #[allow(deprecated)]
         if self
             .size
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
