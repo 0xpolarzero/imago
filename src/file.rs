@@ -908,7 +908,7 @@ impl File {
             .try_into()
             .map_err(|e| io::Error::other(format!("Discard/write-zeroes length error: {e}")))?;
 
-        let end = offset.saturating_add(length).saturating_add(1);
+        let end = offset.saturating_add(length);
         let params = FILE_ZERO_DATA_INFORMATION {
             FileOffset: offset,
             BeyondFinalZero: end,
@@ -965,6 +965,40 @@ impl File {
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     async fn discard_to_zero_os_specific(&self, offset: u64, length: u64) -> io::Result<()> {
         Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
+    async fn zero_data_preserves_the_byte_at_the_exclusive_end() {
+        let path = std::env::temp_dir().join(format!(
+            "imago-zero-data-boundary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, vec![0x5a; 12288]).unwrap();
+        let host = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let storage = File::try_from(host).unwrap();
+        let zero_result = storage.discard_to_zero_os_specific(4096, 4096).await;
+        drop(storage);
+
+        let contents = fs::read(&path);
+        let _ = fs::remove_file(&path);
+        zero_result.unwrap();
+        let contents = contents.unwrap();
+        assert_eq!(contents[4095], 0x5a);
+        assert!(contents[4096..8192].iter().all(|byte| *byte == 0));
+        assert_eq!(contents[8192], 0x5a);
     }
 }
 
