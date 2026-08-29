@@ -808,41 +808,8 @@ impl File {
         err
     }
 
-    /// Attempt to discard range by truncating the file.
-    ///
-    /// If the given range is at the end of the file, discard it by simply truncating the file.
-    /// Return `true` on success.
-    ///
-    /// If the range is not at the end of the file, i.e. another method of discarding is needed,
-    /// return `false`.
-    fn try_discard_by_truncate(&self, offset: u64, length: u64) -> io::Result<bool> {
-        // Prevent modifications to the file length
-        #[allow(clippy::readonly_write_lock)]
-        let file = self.file.write().unwrap();
-
-        let size = self.size.load(Ordering::Relaxed);
-        if offset >= size {
-            // Nothing to do
-            return Ok(true);
-        }
-
-        // If `offset + length` overflows, we can just assume it ends at `size`.  (Anything past
-        // `size is irrelevant anyway.)
-        let end = offset.checked_add(length).unwrap_or(size);
-        if end < size {
-            return Ok(false);
-        }
-
-        file.set_len(offset)?;
-        Ok(true)
-    }
-
     /// Ensure the given range reads back as zeroes, or return an error.
     async fn discard_to_zero(&self, offset: u64, length: u64) -> io::Result<()> {
-        if self.try_discard_by_truncate(offset, length)? {
-            return Ok(());
-        }
-
         if self.discard_unsupported.load(Ordering::Relaxed) {
             Err(io::ErrorKind::Unsupported.into())
         } else if let Err(err) = self.discard_to_zero_os_specific(offset, length).await {
@@ -1037,4 +1004,31 @@ mod ioctl {
 
     #[cfg(target_os = "freebsd")]
     ioctl_read!(diocgmediasize, 'd', 129, libc::off_t);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::File;
+    use crate::{Storage, StorageExt, StorageOpenOptions};
+    use std::io;
+
+    #[test]
+    fn tail_discard_keeps_file_length() -> io::Result<()> {
+        let path =
+            std::env::temp_dir().join(format!("imago-tail-discard-{}.raw", std::process::id()));
+        std::fs::write(&path, vec![0xabu8; 8192])?;
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .build()?
+            .block_on(async {
+                let file =
+                    File::open(StorageOpenOptions::new().write(true).filename(&path)).await?;
+                file.discard(4096, 4096).await?;
+                assert_eq!(std::fs::metadata(&path)?.len(), 8192);
+                io::Result::Ok(())
+            });
+
+        std::fs::remove_file(path)?;
+        result
+    }
 }
