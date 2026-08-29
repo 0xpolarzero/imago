@@ -828,7 +828,7 @@ impl File {
 
     /// Attempt to discard range by truncating the file.
     ///
-    /// If the given range is at the end of the file, discard it by simply truncating the file.
+    /// If the range reaches the end of the file, truncate and restore the original file length.
     /// Return `true` on success.
     ///
     /// If the range is not at the end of the file, i.e. another method of discarding is needed,
@@ -852,6 +852,7 @@ impl File {
         }
 
         file.set_len(offset)?;
+        file.set_len(size)?;
         Ok(true)
     }
 
@@ -1089,4 +1090,40 @@ mod ioctl {
 
     #[cfg(target_os = "freebsd")]
     ioctl_read!(diocgmediasize, 'd', 129, libc::off_t);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::File;
+    use crate::{Storage, StorageExt, StorageOpenOptions};
+    use std::io;
+
+    #[test]
+    fn tail_discard_keeps_file_length() -> io::Result<()> {
+        let path =
+            std::env::temp_dir().join(format!("imago-tail-discard-{}.raw", std::process::id()));
+        std::fs::write(&path, vec![0xabu8; 8192])?;
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .build()?
+            .block_on(async {
+                let file =
+                    File::open(StorageOpenOptions::new().write(true).filename(&path)).await?;
+                file.discard(4096, 4096).await?;
+                assert_eq!(std::fs::metadata(&path)?.len(), 8192);
+
+                let mut prefix = vec![0u8; 4096];
+                file.read(&mut prefix, 0).await?;
+                assert_eq!(prefix, vec![0xabu8; 4096]);
+
+                let mut tail = vec![0xffu8; 4096];
+                file.read(&mut tail, 4096).await?;
+                assert!(tail.iter().all(|&byte| byte == 0));
+
+                io::Result::Ok(())
+            });
+
+        std::fs::remove_file(path)?;
+        result
+    }
 }
