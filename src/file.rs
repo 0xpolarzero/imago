@@ -969,10 +969,15 @@ impl File {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
-    use super::*;
+    use super::File;
+    use crate::{Storage, StorageExt, StorageOpenOptions};
+    #[cfg(windows)]
+    use std::fs;
+    use std::io;
 
+    #[cfg(windows)]
     #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
     async fn zero_data_preserves_the_byte_at_the_exclusive_end() {
         let path = std::env::temp_dir().join(format!(
@@ -1000,6 +1005,36 @@ mod tests {
         assert_eq!(contents[4095], 0x5a);
         assert!(contents[4096..8192].iter().all(|byte| *byte == 0));
         assert_eq!(contents[8192], 0x5a);
+    }
+
+    struct TempPath(std::path::PathBuf);
+
+    impl Drop for TempPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
+    async fn tail_discard_keeps_file_length() -> io::Result<()> {
+        let path =
+            std::env::temp_dir().join(format!("imago-tail-discard-{}.raw", std::process::id()));
+        let _temp_path = TempPath(path.clone());
+        std::fs::write(&path, vec![0xabu8; 8192])?;
+
+        let file = File::open(StorageOpenOptions::new().write(true).filename(&path)).await?;
+        file.discard(4096, 4096).await?;
+        assert_eq!(std::fs::metadata(&path)?.len(), 8192);
+
+        let mut prefix = vec![0u8; 4096];
+        file.read(&mut prefix, 0).await?;
+        assert_eq!(prefix, vec![0xabu8; 4096]);
+
+        let mut tail = vec![0xffu8; 4096];
+        file.read(&mut tail, 4096).await?;
+        assert!(tail.iter().all(|&byte| byte == 0));
+
+        io::Result::Ok(())
     }
 }
 
@@ -1090,40 +1125,4 @@ mod ioctl {
 
     #[cfg(target_os = "freebsd")]
     ioctl_read!(diocgmediasize, 'd', 129, libc::off_t);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::File;
-    use crate::{Storage, StorageExt, StorageOpenOptions};
-    use std::io;
-
-    #[test]
-    fn tail_discard_keeps_file_length() -> io::Result<()> {
-        let path =
-            std::env::temp_dir().join(format!("imago-tail-discard-{}.raw", std::process::id()));
-        std::fs::write(&path, vec![0xabu8; 8192])?;
-
-        let result = tokio::runtime::Builder::new_current_thread()
-            .build()?
-            .block_on(async {
-                let file =
-                    File::open(StorageOpenOptions::new().write(true).filename(&path)).await?;
-                file.discard(4096, 4096).await?;
-                assert_eq!(std::fs::metadata(&path)?.len(), 8192);
-
-                let mut prefix = vec![0u8; 4096];
-                file.read(&mut prefix, 0).await?;
-                assert_eq!(prefix, vec![0xabu8; 4096]);
-
-                let mut tail = vec![0xffu8; 4096];
-                file.read(&mut tail, 4096).await?;
-                assert!(tail.iter().all(|&byte| byte == 0));
-
-                io::Result::Ok(())
-            });
-
-        std::fs::remove_file(path)?;
-        result
-    }
 }
