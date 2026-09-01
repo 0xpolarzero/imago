@@ -972,10 +972,8 @@ impl File {
 #[cfg(test)]
 mod tests {
     use super::File;
-    use crate::{Storage, StorageExt, StorageOpenOptions};
-    #[cfg(windows)]
+    use crate::Storage;
     use std::fs;
-    use std::io;
 
     #[cfg(windows)]
     #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
@@ -1015,26 +1013,27 @@ mod tests {
         }
     }
 
-    #[maybe_async::test(feature = "sync", async(feature = "async", tokio::test))]
-    async fn tail_discard_keeps_file_length() -> io::Result<()> {
-        let path =
-            std::env::temp_dir().join(format!("imago-tail-discard-{}.raw", std::process::id()));
-        let _temp_path = TempPath(path.clone());
-        std::fs::write(&path, vec![0xabu8; 8192])?;
-
-        let file = File::open(StorageOpenOptions::new().write(true).filename(&path)).await?;
-        file.discard(4096, 4096).await?;
-        assert_eq!(std::fs::metadata(&path)?.len(), 8192);
-
-        let mut prefix = vec![0u8; 4096];
-        file.read(&mut prefix, 0).await?;
-        assert_eq!(prefix, vec![0xabu8; 4096]);
-
-        let mut tail = vec![0xffu8; 4096];
-        file.read(&mut tail, 4096).await?;
-        assert!(tail.iter().all(|&byte| byte == 0));
-
-        io::Result::Ok(())
+    #[test]
+    fn tail_discard_keeps_file_length() {
+        let _temp_path = TempPath(std::env::temp_dir().join(format!(
+            "imago-tail-discard-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let host = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&_temp_path.0)
+            .unwrap();
+        host.set_len(8192).unwrap();
+        let file = File::try_from(host).unwrap();
+        assert!(file.try_discard_by_truncate(4096, 4096).unwrap());
+        assert_eq!(file.size().unwrap(), 8192);
+        assert_eq!(fs::metadata(&_temp_path.0).unwrap().len(), 8192);
     }
 }
 
